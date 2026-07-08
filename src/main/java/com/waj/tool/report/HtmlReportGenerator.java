@@ -15,8 +15,11 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.Base64;
 import java.util.EnumMap;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 /** Builds a self-contained HTML site-survey report (no external resources - images are inlined as base64). */
 public final class HtmlReportGenerator {
@@ -29,18 +32,25 @@ public final class HtmlReportGenerator {
     public static void generate(ReportData data, File file) throws IOException {
         StringBuilder html = new StringBuilder();
         html.append("<!doctype html><html><head><meta charset='utf-8'><title>Wi-Fi Site Survey Report</title><style>")
-                .append("body{font-family:'Segoe UI',sans-serif;margin:24px;color:#222;}")
-                .append("h1{font-size:20px;} h2{font-size:16px;border-bottom:2px solid #333;padding-bottom:4px;margin-top:32px;}")
+                .append("body{font-family:'BIZ UDPGothic','BIZ UDGothic','Yu Gothic UI','Segoe UI',sans-serif;margin:24px;color:#222;}")
+                .append("h1{font-size:20px;margin:0;} h2{font-size:16px;border-bottom:2px solid #333;padding-bottom:4px;margin-top:32px;}")
+                .append(".meta{margin-top:8px;}")
+                .append(".summary{margin-top:14px;display:grid;grid-template-columns:220px 1fr;gap:6px 12px;max-width:840px;}")
+                .append(".summary .k{font-weight:700;background:#f3f4f6;padding:4px 8px;border:1px solid #d8dde3;}")
+                .append(".summary .v{padding:4px 8px;border:1px solid #d8dde3;}")
                 .append("table{border-collapse:collapse;width:100%;margin-top:8px;}")
                 .append("th,td{border:1px solid #ccc;padding:6px 8px;font-size:12px;text-align:left;}")
                 .append("th{background:#f0f0f0;}")
                 .append(".risk-high{background:#e74c3c;color:white;} .risk-medium{background:#f1c40f;} .risk-low{background:#2ecc71;color:white;}")
+                .append(".mono{font-family:'Consolas','Cascadia Mono','BIZ UDGothic',monospace;}")
                 .append("img.floorplan{max-width:100%;border:1px solid #999;margin-top:8px;}")
                 .append("</style></head><body>");
 
         html.append("<h1>").append(Messages.get("report.title")).append("</h1>");
-        html.append("<p>").append(Messages.get("report.generatedAtLabel")).append(" ").append(data.generatedAt()).append("<br>")
+        html.append("<p class='meta'>").append(Messages.get("report.generatedAtLabel")).append(" ").append(data.generatedAt()).append("<br>")
                 .append(escape(data.interfaceDescription())).append("</p>");
+
+        appendExecutiveSummary(html, data);
 
         if (data.floorPlanSnapshot() != null) {
             html.append("<h2>").append(Messages.get("report.section.floorPlanHeatmap")).append("</h2>");
@@ -49,14 +59,23 @@ public final class HtmlReportGenerator {
                     .append("'/>");
         }
 
-        html.append("<h2>").append(Messages.get("report.section.apList")).append("</h2><table><tr><th>SSID</th><th>BSSID</th><th>")
-                .append(Messages.get("report.column.channel")).append("</th><th>Band</th><th>RSSI</th><th>")
-                .append(Messages.get("report.column.security")).append("</th></tr>");
+        html.append("<h2>").append(Messages.get("report.section.apList")).append("</h2><table><tr>")
+                .append("<th>#</th><th>SSID</th><th>BSSID</th><th>")
+                .append(Messages.get("report.column.band")).append("/")
+                .append(Messages.get("report.column.channel"))
+                .append("</th><th>Freq</th><th>RSSI</th><th>Quality</th><th>PHY</th><th>")
+                .append(Messages.get("report.column.security")).append("</th><th>Util</th></tr>");
+        int apIndex = 1;
         for (ApSnapshot ap : data.accessPoints()) {
-            html.append("<tr><td>").append(escape(ap.ssid().isEmpty() ? "<hidden>" : ap.ssid())).append("</td><td>")
-                    .append(escape(ap.bssid())).append("</td><td>").append(ap.channel()).append("</td><td>")
-                    .append(ap.band()).append("</td><td>").append(ap.rssiDbm()).append("</td><td class='")
-                    .append(riskClass(ap.securityType())).append("'>").append(ap.securityType().label()).append("</td></tr>");
+            html.append("<tr><td class='mono'>").append(apIndex++).append("</td><td>")
+                    .append(escape(ap.ssid().isEmpty() ? "<hidden>" : ap.ssid())).append("</td><td class='mono'>")
+                    .append(escape(ap.bssid())).append("</td><td class='mono'>").append(ap.band()).append(" / ").append(ap.channel())
+                    .append("</td><td class='mono'>").append(String.format(Locale.ROOT, "%.0fMHz", ap.frequencyKhz() / 1000.0))
+                    .append("</td><td class='mono'>").append(ap.rssiDbm()).append("dBm</td><td class='mono'>").append(ap.linkQuality()).append("%</td><td>")
+                    .append(escape(ap.phyType())).append("</td><td class='")
+                    .append(riskClass(ap.securityType())).append("'>").append(ap.securityType().label()).append("</td><td class='mono'>")
+                    .append(ap.channelUtilizationPercent() == null ? "N/A" : ap.channelUtilizationPercent() + "%")
+                    .append("</td></tr>");
         }
         html.append("</table>");
 
@@ -73,28 +92,82 @@ public final class HtmlReportGenerator {
         }
         html.append("</table>");
 
+        html.append("<h3 style='margin-top:12px;'>Findings (requires review)</h3><table><tr><th>SSID</th><th>BSSID</th><th>Type</th><th>Band</th><th>Notes</th></tr>");
+        boolean hasFinding = false;
+        for (ApSnapshot ap : data.accessPoints()) {
+            if (ap.securityType().riskLevel() == SecurityType.RiskLevel.LOW) {
+                continue;
+            }
+            hasFinding = true;
+            html.append("<tr><td>").append(escape(ap.ssid().isEmpty() ? "<hidden>" : ap.ssid())).append("</td><td class='mono'>")
+                    .append(escape(ap.bssid())).append("</td><td class='").append(riskClass(ap.securityType())).append("'>")
+                    .append(ap.securityType().label()).append("</td><td class='mono'>").append(ap.band()).append("</td><td>")
+                    .append(escape(securityNote(ap.securityType()))).append("</td></tr>");
+        }
+        if (!hasFinding) {
+            html.append("<tr><td colspan='5'>No medium/high risk APs detected in this snapshot.</td></tr>");
+        }
+        html.append("</table>");
+
         html.append("<h2>").append(Messages.get("report.section.channelRecommendation")).append("</h2><table><tr><th>")
                 .append(Messages.get("report.column.band")).append("</th><th>").append(Messages.get("report.column.recommendedChannel"))
-                .append("</th><th>").append(Messages.get("report.column.congestionScore")).append("</th></tr>");
+                .append("</th><th>").append(Messages.get("report.column.congestionScore")).append("</th><th>Observed Channels</th></tr>");
+        Map<String, ChannelPlanner.Recommendation> recByBand = new LinkedHashMap<>();
         for (String band : BANDS) {
             List<ApSnapshot> inBand = data.accessPoints().stream().filter(a -> a.band().equals(band)).toList();
             if (inBand.isEmpty()) {
                 continue;
             }
             ChannelPlanner.Recommendation rec = ChannelPlanner.recommend(inBand, band);
-            html.append("<tr><td>").append(band).append("</td><td>").append(rec.channel()).append("</td><td>")
-                    .append(String.format(java.util.Locale.ROOT, "%.1f", rec.score())).append("</td></tr>");
+            recByBand.put(band, rec);
+            String observed = inBand.stream().map(ApSnapshot::channel).distinct().sorted().map(String::valueOf)
+                    .collect(Collectors.joining(", "));
+            html.append("<tr><td>").append(band).append("</td><td class='mono'>").append(rec.channel()).append("</td><td class='mono'>")
+                    .append(String.format(Locale.ROOT, "%.1f", rec.score())).append("</td><td class='mono'>")
+                    .append(observed).append("</td></tr>");
+        }
+        html.append("</table>");
+
+        html.append("<h3 style='margin-top:12px;'>Channel score details (higher score = more congestion)</h3>")
+                .append("<table><tr><th>Band</th><th>Ch</th><th>Score</th><th>APs</th><th>Top Contributor</th></tr>");
+        for (Map.Entry<String, ChannelPlanner.Recommendation> e : recByBand.entrySet()) {
+            String band = e.getKey();
+            ChannelPlanner.Recommendation rec = e.getValue();
+            List<Integer> inUse = data.accessPoints().stream()
+                    .filter(ap -> ap.band().equals(band))
+                    .map(ApSnapshot::channel)
+                    .distinct()
+                    .sorted((a, b) -> Double.compare(rec.allScores().getOrDefault(b, 0.0), rec.allScores().getOrDefault(a, 0.0)))
+                    .toList();
+            for (Integer ch : inUse) {
+                long apCount = data.accessPoints().stream().filter(ap -> ap.band().equals(band) && ap.channel() == ch).count();
+                ChannelPlanner.Recommendation.ApContribution top = rec.perChannelContributions().getOrDefault(ch, List.of())
+                        .stream().max(java.util.Comparator.comparingDouble(ChannelPlanner.Recommendation.ApContribution::contribution))
+                        .orElse(null);
+                String contributor = top == null ? "-"
+                        : escape((top.ssid().isEmpty() ? "<hidden>" : top.ssid()) + " (" + shortBssid(top.bssid()) + ") "
+                        + String.format(Locale.ROOT, "%.1f pts", top.contribution()));
+                html.append("<tr><td>").append(band).append("</td><td class='mono'>").append(ch).append("</td><td class='mono'>")
+                        .append(String.format(Locale.ROOT, "%.1f", rec.allScores().getOrDefault(ch, 0.0))).append("</td><td class='mono'>")
+                        .append(apCount).append("</td><td>").append(contributor).append("</td></tr>");
+            }
         }
         html.append("</table>");
 
         if (!data.surveyPoints().isEmpty()) {
-            html.append("<h2>").append(Messages.get("report.section.surveyPoints")).append("</h2><table><tr><th>#</th><th>")
-                    .append(Messages.get("report.column.coordinates")).append("</th><th>Ping</th></tr>");
+            appendSurveyPointSummary(html, data.surveyPoints());
+            html.append("<h2>").append(Messages.get("report.section.surveyPoints")).append("</h2><table><tr><th>#</th><th>Time</th><th>")
+                    .append(Messages.get("report.column.coordinates")).append("</th><th>Visible APs</th><th>Strongest RSSI</th><th>Ping</th></tr>");
             int i = 1;
             for (SurveyPoint p : data.surveyPoints()) {
                 String ping = p.pingRttMs != null ? escape(p.pingHost) + ": " + p.pingRttMs + "ms" : "-";
-                html.append("<tr><td>").append(i++).append("</td><td>")
-                        .append(String.format(java.util.Locale.ROOT, "(%.2f, %.2f)", p.xNorm, p.yNorm)).append("</td><td>")
+                int visible = p.rssiByBssid == null ? 0 : p.rssiByBssid.size();
+                Integer strongest = p.rssiByBssid == null ? null : p.rssiByBssid.values().stream().max(Integer::compareTo).orElse(null);
+                html.append("<tr><td class='mono'>").append(i++).append("</td><td class='mono'>")
+                        .append(java.time.Instant.ofEpochSecond(p.epochSecond)).append("</td><td class='mono'>")
+                        .append(String.format(Locale.ROOT, "(%.2f, %.2f)", p.xNorm, p.yNorm)).append("</td><td class='mono'>")
+                        .append(visible).append("</td><td class='mono'>")
+                        .append(strongest == null ? "-" : strongest + "dBm").append("</td><td>")
                         .append(ping).append("</td></tr>");
             }
             html.append("</table>");
@@ -108,12 +181,78 @@ public final class HtmlReportGenerator {
         Files.writeString(file.toPath(), html.toString(), StandardCharsets.UTF_8);
     }
 
+    private static void appendExecutiveSummary(StringBuilder html, ReportData data) {
+        List<ApSnapshot> aps = data.accessPoints();
+        List<SurveyPoint> points = data.surveyPoints();
+        long high = aps.stream().filter(a -> a.securityType().riskLevel() == SecurityType.RiskLevel.HIGH).count();
+        long medium = aps.stream().filter(a -> a.securityType().riskLevel() == SecurityType.RiskLevel.MEDIUM).count();
+        String bands = aps.stream().map(ApSnapshot::band).distinct().sorted().collect(Collectors.joining(", "));
+        double avg = aps.stream().mapToInt(ApSnapshot::rssiDbm).average().orElse(Double.NaN);
+        html.append("<div class='summary'>")
+                .append("<div class='k'>Detected APs</div><div class='v mono'>").append(aps.size()).append("</div>")
+                .append("<div class='k'>Survey Points</div><div class='v mono'>").append(points.size()).append("</div>")
+                .append("<div class='k'>Bands</div><div class='v mono'>").append(escape(bands.isBlank() ? "-" : bands)).append("</div>")
+                .append("<div class='k'>Average RSSI</div><div class='v mono'>")
+                .append(Double.isNaN(avg) ? "-" : String.format(Locale.ROOT, "%.1f dBm", avg)).append("</div>")
+                .append("<div class='k'>High / Medium Risk APs</div><div class='v mono'>")
+                .append(high).append(" / ").append(medium).append("</div>")
+                .append("</div>");
+    }
+
+    private static void appendSurveyPointSummary(StringBuilder html, List<SurveyPoint> points) {
+        int configured = 0;
+        int success = 0;
+        int timeout = 0;
+        int min = Integer.MAX_VALUE;
+        int max = Integer.MIN_VALUE;
+        long sum = 0;
+        for (SurveyPoint p : points) {
+            if (p.pingHost == null || p.pingHost.isBlank()) {
+                continue;
+            }
+            configured++;
+            if (p.pingRttMs == null) {
+                timeout++;
+                continue;
+            }
+            success++;
+            min = Math.min(min, p.pingRttMs);
+            max = Math.max(max, p.pingRttMs);
+            sum += p.pingRttMs;
+        }
+        String rtt = success == 0 ? "-"
+                : String.format(Locale.ROOT, "%d / %.1f / %d ms", min, sum / (double) success, max);
+        html.append("<h3 style='margin-top:12px;'>Survey Point Metrics</h3>")
+                .append("<div class='summary'>")
+                .append("<div class='k'>Ping Configured Points</div><div class='v mono'>").append(configured).append("</div>")
+                .append("<div class='k'>Ping Success / Timeout</div><div class='v mono'>").append(success).append(" / ").append(timeout).append("</div>")
+                .append("<div class='k'>Ping RTT (min / avg / max)</div><div class='v mono'>").append(rtt).append("</div>")
+                .append("</div>");
+    }
+
     private static String riskClass(SecurityType type) {
         return switch (type.riskLevel()) {
             case HIGH -> "risk-high";
             case MEDIUM -> "risk-medium";
             case LOW -> "risk-low";
         };
+    }
+
+    private static String securityNote(SecurityType type) {
+        return switch (type) {
+            case OPEN -> "No encryption";
+            case WEP -> "Legacy broken encryption";
+            case WPA -> "Legacy WPA";
+            case UNKNOWN -> "Unable to classify from IE";
+            default -> "No action required";
+        };
+    }
+
+    private static String shortBssid(String bssid) {
+        if (bssid == null || bssid.length() < 5) {
+            return bssid == null ? "" : bssid;
+        }
+        return bssid.substring(bssid.length() - 5);
     }
 
     private static String toBase64Png(javafx.scene.image.Image image) throws IOException {
