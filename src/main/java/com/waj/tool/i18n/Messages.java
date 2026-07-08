@@ -42,10 +42,11 @@ public final class Messages {
      * Formats with {@link String#format} - placeholders must use explicit argument indices
      * ({@code %1$s}, {@code %2$d}, ...) rather than plain sequential {@code %s}/{@code %d}, so a
      * translation can freely reorder clauses (a real need between Japanese and English word order)
-     * without silently swapping two same-typed arguments' meaning.
+     * without silently swapping two same-typed arguments' meaning. {@link Locale#ROOT} keeps
+     * numeric formatting stable; the app's language is already selected by the loaded bundle.
      */
     public static String get(String key, Object... args) {
-        return String.format(get(key), args);
+        return String.format(Locale.ROOT, get(key), args);
     }
 
     private static Properties load(Locale locale) {

@@ -22,9 +22,6 @@ import java.awt.Color;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
-import java.time.Instant;
-import java.time.ZoneId;
-import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.EnumMap;
@@ -47,9 +44,6 @@ import java.util.stream.Collectors;
  */
 public final class PdfReportGenerator {
 
-    private static final List<String> BANDS = List.of("2.4GHz", "5GHz", "6GHz");
-    private static final DateTimeFormatter TIMESTAMP_FORMAT =
-            DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss").withZone(ZoneId.systemDefault());
     private static final List<String> BIZ_UD_REGULAR_FILES = List.of(
             "BIZ-UDGothicR.ttc",
             "BIZ-UDPGothicR.ttc",
@@ -74,10 +68,6 @@ public final class PdfReportGenerator {
     }
 
     private record FontPack(Font title, Font heading, Font body, Font bodyBold, Font mono, Font disclaimer) {
-    }
-
-    private record PingStats(int configuredPoints, int successCount, int timeoutCount,
-                              Integer minMs, Integer maxMs, Double avgMs) {
     }
 
     public static void generate(ReportData data, File file) throws Exception {
@@ -109,31 +99,25 @@ public final class PdfReportGenerator {
         Paragraph title = new Paragraph(Messages.get("report.title"), fonts.title());
         title.setSpacingAfter(6);
         document.add(title);
-        document.add(new Paragraph(Messages.get("report.generatedAtLabel") + " " + formatInstant(data.generatedAt()), fonts.body()));
+        document.add(new Paragraph(Messages.get("report.generatedAtLabel") + " " + ReportText.formatInstant(data.generatedAt()), fonts.body()));
         document.add(new Paragraph(safe(data.interfaceDescription()), fonts.body()));
         document.add(new Paragraph(" ", fonts.body()));
     }
 
     private static void addExecutiveSummary(Document document, ReportData data, FontPack fonts) throws Exception {
-        addSectionHeading(document, "Executive Summary", fonts);
+        addSectionHeading(document, Messages.get("report.section.executiveSummary"), fonts);
         PdfPTable summary = new PdfPTable(2);
         styleTable(summary, 0);
         summary.setWidths(new float[]{30, 70});
 
-        List<ApSnapshot> aps = data.accessPoints() == null ? List.of() : data.accessPoints();
-        List<SurveyPoint> points = data.surveyPoints() == null ? List.of() : data.surveyPoints();
-        long highRiskCount = aps.stream().filter(a -> a.securityType().riskLevel() == SecurityType.RiskLevel.HIGH).count();
-        long mediumRiskCount = aps.stream().filter(a -> a.securityType().riskLevel() == SecurityType.RiskLevel.MEDIUM).count();
-        double avgRssi = aps.stream().mapToInt(ApSnapshot::rssiDbm).average().orElse(Double.NaN);
-        String bands = aps.stream().map(ApSnapshot::band).distinct().sorted().collect(Collectors.joining(", "));
-        PingStats pingStats = computePingStats(points);
-
-        addSummaryRow(summary, "Detected APs", String.valueOf(aps.size()), fonts);
-        addSummaryRow(summary, "Survey Points", String.valueOf(points.size()), fonts);
-        addSummaryRow(summary, "Bands", bands.isBlank() ? "-" : bands, fonts);
-        addSummaryRow(summary, "Average RSSI", Double.isNaN(avgRssi) ? "-" : String.format(Locale.ROOT, "%.1f dBm", avgRssi), fonts);
-        addSummaryRow(summary, "High / Medium Risk APs", highRiskCount + " / " + mediumRiskCount, fonts);
-        addSummaryRow(summary, "Ping Success", formatPingSummary(pingStats), fonts);
+        ReportMetrics.ExecutiveSummary metrics = ReportMetrics.executiveSummary(data);
+        addSummaryRow(summary, Messages.get("report.field.detectedAps"), String.valueOf(metrics.accessPointCount()), fonts);
+        addSummaryRow(summary, Messages.get("report.field.surveyPoints"), String.valueOf(metrics.surveyPointCount()), fonts);
+        addSummaryRow(summary, Messages.get("report.field.bands"), metrics.bands().isBlank() ? "-" : metrics.bands(), fonts);
+        addSummaryRow(summary, Messages.get("report.field.averageRssi"), ReportMetrics.formatAverageRssi(metrics.averageRssi()), fonts);
+        addSummaryRow(summary, Messages.get("report.field.highMediumRiskAps"),
+                metrics.highRiskAccessPoints() + " / " + metrics.mediumRiskAccessPoints(), fonts);
+        addSummaryRow(summary, Messages.get("report.field.pingSuccess"), ReportText.formatPingSummary(metrics.pingStats()), fonts);
 
         document.add(summary);
         document.add(new Paragraph(" ", fonts.body()));
@@ -144,9 +128,7 @@ public final class PdfReportGenerator {
             return;
         }
         addSectionHeading(document, Messages.get("report.section.floorPlanHeatmap"), fonts);
-        document.add(new Paragraph(
-                "Snapshot of the Site Survey canvas (floor plan + heatmap + recorded points).",
-                fonts.body()));
+        document.add(new Paragraph(Messages.get("report.message.floorPlanSnapshot"), fonts.body()));
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
         ImageIO.write(SwingFXUtils.fromFXImage(data.floorPlanSnapshot(), null), "png", baos);
         org.openpdf.text.Image img = org.openpdf.text.Image.getInstance(baos.toByteArray());
@@ -157,10 +139,10 @@ public final class PdfReportGenerator {
     }
 
     private static void addAccessPointSection(Document document, ReportData data, FontPack fonts) throws Exception {
-        List<ApSnapshot> aps = data.accessPoints() == null ? List.of() : data.accessPoints();
+        List<ApSnapshot> aps = ReportMetrics.accessPoints(data);
         addSectionHeading(document, Messages.get("report.section.apList"), fonts);
         if (aps.isEmpty()) {
-            document.add(new Paragraph("No access points were captured at export time.", fonts.body()));
+            document.add(new Paragraph(Messages.get("report.message.noAccessPoints"), fonts.body()));
             document.add(new Paragraph(" ", fonts.body()));
             return;
         }
@@ -169,19 +151,22 @@ public final class PdfReportGenerator {
         styleTable(apTable, 1);
         apTable.setWidths(new float[]{3, 14, 17, 8, 7, 8, 8, 13, 12, 8});
         for (String h : new String[]{
-                "#", "SSID", "BSSID", "Band/Ch", "Freq", "RSSI", "Quality", "PHY", "Security", "Util"
+                Messages.get("report.column.index"),
+                Messages.get("report.column.ssid"),
+                Messages.get("report.column.bssid"),
+                Messages.get("report.column.bandChannel"),
+                Messages.get("report.column.frequency"),
+                Messages.get("report.column.rssi"),
+                Messages.get("report.column.quality"),
+                Messages.get("report.column.phy"),
+                Messages.get("report.column.security"),
+                Messages.get("report.column.utilization")
         }) {
             apTable.addCell(headerCell(h, fonts.bodyBold()));
         }
 
-        List<ApSnapshot> sorted = new ArrayList<>(aps);
-        sorted.sort(Comparator
-                .comparingInt((ApSnapshot ap) -> bandOrder(ap.band()))
-                .thenComparingInt(ApSnapshot::channel)
-                .thenComparing(Comparator.comparingInt(ApSnapshot::rssiDbm).reversed()));
-
         int index = 1;
-        for (ApSnapshot ap : sorted) {
+        for (ApSnapshot ap : ReportMetrics.sortedAccessPoints(aps)) {
             apTable.addCell(cell(String.valueOf(index++), fonts.mono()));
             apTable.addCell(cell(ap.ssid().isEmpty() ? "<hidden>" : ap.ssid(), fonts.body()));
             apTable.addCell(cell(ap.bssid(), fonts.mono()));
@@ -200,7 +185,7 @@ public final class PdfReportGenerator {
     }
 
     private static void addSecuritySection(Document document, ReportData data, FontPack fonts) throws Exception {
-        List<ApSnapshot> aps = data.accessPoints() == null ? List.of() : data.accessPoints();
+        List<ApSnapshot> aps = ReportMetrics.accessPoints(data);
         addSectionHeading(document, Messages.get("report.section.securitySummary"), fonts);
 
         Map<SecurityType, Long> byType = new EnumMap<>(SecurityType.class);
@@ -212,7 +197,7 @@ public final class PdfReportGenerator {
         summaryTable.setWidths(new float[]{46, 20, 34});
         summaryTable.addCell(headerCell(Messages.get("report.column.type"), fonts.bodyBold()));
         summaryTable.addCell(headerCell(Messages.get("report.column.count"), fonts.bodyBold()));
-        summaryTable.addCell(headerCell("Risk", fonts.bodyBold()));
+        summaryTable.addCell(headerCell(Messages.get("report.column.risk"), fonts.bodyBold()));
         for (SecurityType type : SecurityType.values()) {
             long count = byType.getOrDefault(type, 0L);
             PdfPCell typeCell = cell(type.label(), fonts.body());
@@ -226,9 +211,9 @@ public final class PdfReportGenerator {
         List<ApSnapshot> findings = aps.stream()
                 .filter(ap -> ap.securityType().riskLevel() != SecurityType.RiskLevel.LOW)
                 .toList();
-        document.add(new Paragraph("Findings (requires review):", fonts.bodyBold()));
+        document.add(new Paragraph(Messages.get("report.section.findings") + ":", fonts.bodyBold()));
         if (findings.isEmpty()) {
-            document.add(new Paragraph("No medium/high risk APs detected in this snapshot.", fonts.body()));
+            document.add(new Paragraph(Messages.get("report.message.noFindings"), fonts.body()));
             document.add(new Paragraph(" ", fonts.body()));
             return;
         }
@@ -236,7 +221,13 @@ public final class PdfReportGenerator {
         PdfPTable findingsTable = new PdfPTable(5);
         styleTable(findingsTable, 1);
         findingsTable.setWidths(new float[]{20, 24, 20, 10, 26});
-        for (String h : new String[]{"SSID", "BSSID", "Type", "Band", "Notes"}) {
+        for (String h : new String[]{
+                Messages.get("report.column.ssid"),
+                Messages.get("report.column.bssid"),
+                Messages.get("report.column.type"),
+                Messages.get("report.column.band"),
+                Messages.get("report.column.notes")
+        }) {
             findingsTable.addCell(headerCell(h, fonts.bodyBold()));
         }
         for (ApSnapshot ap : findings) {
@@ -246,17 +237,17 @@ public final class PdfReportGenerator {
             typeCell.setBackgroundColor(riskColor(ap.securityType()));
             findingsTable.addCell(typeCell);
             findingsTable.addCell(cell(ap.band(), fonts.mono()));
-            findingsTable.addCell(cell(securityNote(ap.securityType()), fonts.body()));
+            findingsTable.addCell(cell(ReportText.securityNote(ap.securityType()), fonts.body()));
         }
         document.add(findingsTable);
         document.add(new Paragraph(" ", fonts.body()));
     }
 
     private static void addChannelSection(Document document, ReportData data, FontPack fonts) throws Exception {
-        List<ApSnapshot> aps = data.accessPoints() == null ? List.of() : data.accessPoints();
+        List<ApSnapshot> aps = ReportMetrics.accessPoints(data);
         addSectionHeading(document, Messages.get("report.section.channelRecommendation"), fonts);
         if (aps.isEmpty()) {
-            document.add(new Paragraph("No AP data is available for channel analysis.", fonts.body()));
+            document.add(new Paragraph(Messages.get("report.message.noChannelData"), fonts.body()));
             document.add(new Paragraph(" ", fonts.body()));
             return;
         }
@@ -267,10 +258,10 @@ public final class PdfReportGenerator {
         recTable.addCell(headerCell(Messages.get("report.column.band"), fonts.bodyBold()));
         recTable.addCell(headerCell(Messages.get("report.column.recommendedChannel"), fonts.bodyBold()));
         recTable.addCell(headerCell(Messages.get("report.column.congestionScore"), fonts.bodyBold()));
-        recTable.addCell(headerCell("Observed Channels", fonts.bodyBold()));
+        recTable.addCell(headerCell(Messages.get("report.column.observedChannels"), fonts.bodyBold()));
 
         Map<String, ChannelPlanner.Recommendation> recByBand = new LinkedHashMap<>();
-        for (String band : BANDS) {
+        for (String band : ReportMetrics.BANDS) {
             List<ApSnapshot> inBand = aps.stream().filter(a -> a.band().equals(band)).toList();
             if (inBand.isEmpty()) {
                 continue;
@@ -292,11 +283,17 @@ public final class PdfReportGenerator {
         }
         document.add(recTable);
 
-        document.add(new Paragraph("Channel score details (higher score = more congestion):", fonts.bodyBold()));
+        document.add(new Paragraph(Messages.get("report.section.channelScoreDetails") + ":", fonts.bodyBold()));
         PdfPTable detailTable = new PdfPTable(5);
         styleTable(detailTable, 1);
         detailTable.setWidths(new float[]{14, 10, 14, 10, 52});
-        for (String h : new String[]{"Band", "Ch", "Score", "APs", "Top Contributor"}) {
+        for (String h : new String[]{
+                Messages.get("report.column.band"),
+                Messages.get("report.column.channel"),
+                Messages.get("report.column.congestionScore"),
+                Messages.get("report.column.aps"),
+                Messages.get("report.column.topContributor")
+        }) {
             detailTable.addCell(headerCell(h, fonts.bodyBold()));
         }
         for (Map.Entry<String, ChannelPlanner.Recommendation> e : recByBand.entrySet()) {
@@ -336,33 +333,35 @@ public final class PdfReportGenerator {
     }
 
     private static void addSurveyPointSection(Document document, ReportData data, FontPack fonts) throws Exception {
-        List<SurveyPoint> points = data.surveyPoints() == null ? List.of() : data.surveyPoints();
+        List<SurveyPoint> points = ReportMetrics.surveyPoints(data);
         addSectionHeading(document, Messages.get("report.section.surveyPoints"), fonts);
         if (points.isEmpty()) {
-            document.add(new Paragraph("No survey points were recorded.", fonts.body()));
+            document.add(new Paragraph(Messages.get("report.message.noSurveyPoints"), fonts.body()));
             document.add(new Paragraph(" ", fonts.body()));
             return;
         }
 
-        PingStats pingStats = computePingStats(points);
+        ReportMetrics.PingStats pingStats = ReportMetrics.pingStats(points);
         PdfPTable summary = new PdfPTable(2);
         styleTable(summary, 0);
         summary.setWidths(new float[]{30, 70});
-        addSummaryRow(summary, "Total Points", String.valueOf(points.size()), fonts);
-        addSummaryRow(summary, "Ping Configured Points", String.valueOf(pingStats.configuredPoints()), fonts);
-        addSummaryRow(summary, "Ping Success / Timeout", pingStats.successCount() + " / " + pingStats.timeoutCount(), fonts);
-        addSummaryRow(summary, "Ping RTT (min / avg / max)",
-                pingStats.successCount() == 0 ? "-"
-                        : pingStats.minMs() + " / "
-                        + String.format(Locale.ROOT, "%.1f", pingStats.avgMs()) + " / "
-                        + pingStats.maxMs() + " ms",
-                fonts);
+        addSummaryRow(summary, Messages.get("report.field.totalPoints"), String.valueOf(points.size()), fonts);
+        addSummaryRow(summary, Messages.get("report.field.pingConfiguredPoints"), String.valueOf(pingStats.configuredPoints()), fonts);
+        addSummaryRow(summary, Messages.get("report.field.pingSuccessTimeout"), pingStats.successCount() + " / " + pingStats.timeoutCount(), fonts);
+        addSummaryRow(summary, Messages.get("report.field.pingRttMinAvgMax"), ReportMetrics.formatPingRttTriplet(pingStats), fonts);
         document.add(summary);
 
         PdfPTable detail = new PdfPTable(6);
         styleTable(detail, 1);
         detail.setWidths(new float[]{4, 19, 16, 12, 14, 35});
-        for (String h : new String[]{"#", "Timestamp", "Position", "Visible APs", "Strongest RSSI", "Ping"}) {
+        for (String h : new String[]{
+                Messages.get("report.column.index"),
+                Messages.get("report.column.timestamp"),
+                Messages.get("report.column.coordinates"),
+                Messages.get("report.column.visibleAps"),
+                Messages.get("report.column.strongestRssi"),
+                Messages.get("report.column.ping")
+        }) {
             detail.addCell(headerCell(h, fonts.bodyBold()));
         }
 
@@ -370,15 +369,12 @@ public final class PdfReportGenerator {
         for (SurveyPoint p : points) {
             int visibleCount = p.rssiByBssid == null ? 0 : p.rssiByBssid.size();
             Integer strongest = p.rssiByBssid == null ? null : p.rssiByBssid.values().stream().max(Integer::compareTo).orElse(null);
-            String ping = (p.pingHost == null || p.pingHost.isBlank())
-                    ? "-"
-                    : p.pingHost + ": " + (p.pingRttMs == null ? "timeout" : p.pingRttMs + "ms");
             detail.addCell(cell(String.valueOf(index++), fonts.mono()));
-            detail.addCell(cell(formatEpochSeconds(p.epochSecond), fonts.mono()));
+            detail.addCell(cell(ReportText.formatEpochSeconds(p.epochSecond), fonts.mono()));
             detail.addCell(cell(String.format(Locale.ROOT, "(%.3f, %.3f)", p.xNorm, p.yNorm), fonts.mono()));
             detail.addCell(cell(String.valueOf(visibleCount), fonts.mono()));
             detail.addCell(cell(strongest == null ? "-" : strongest + "dBm", fonts.mono()));
-            detail.addCell(cell(ping, fonts.body()));
+            detail.addCell(cell(ReportText.formatSurveyPointPing(p), fonts.body()));
         }
         document.add(detail);
         document.add(new Paragraph(" ", fonts.body()));
@@ -433,27 +429,8 @@ public final class PdfReportGenerator {
         };
     }
 
-    private static String securityNote(SecurityType type) {
-        return switch (type) {
-            case OPEN -> "No encryption";
-            case WEP -> "Legacy broken encryption";
-            case WPA -> "Legacy WPA";
-            case UNKNOWN -> "Unable to classify from IE";
-            default -> "No action required";
-        };
-    }
-
     private static String safe(String s) {
         return s == null ? "" : s;
-    }
-
-    private static int bandOrder(String band) {
-        return switch (band) {
-            case "2.4GHz" -> 1;
-            case "5GHz" -> 2;
-            case "6GHz" -> 3;
-            default -> 99;
-        };
     }
 
     private static String shortBssid(String bssid) {
@@ -461,59 +438,6 @@ public final class PdfReportGenerator {
             return safe(bssid);
         }
         return bssid.substring(bssid.length() - 5);
-    }
-
-    private static String formatInstant(Instant instant) {
-        return instant == null ? "-" : TIMESTAMP_FORMAT.format(instant);
-    }
-
-    private static String formatEpochSeconds(long epochSecond) {
-        return TIMESTAMP_FORMAT.format(Instant.ofEpochSecond(epochSecond));
-    }
-
-    private static PingStats computePingStats(List<SurveyPoint> points) {
-        int configured = 0;
-        int success = 0;
-        int timeout = 0;
-        int min = Integer.MAX_VALUE;
-        int max = Integer.MIN_VALUE;
-        long sum = 0;
-
-        for (SurveyPoint point : points) {
-            boolean hasPing = point.pingHost != null && !point.pingHost.isBlank();
-            if (!hasPing) {
-                continue;
-            }
-            configured++;
-            if (point.pingRttMs == null) {
-                timeout++;
-                continue;
-            }
-            success++;
-            min = Math.min(min, point.pingRttMs);
-            max = Math.max(max, point.pingRttMs);
-            sum += point.pingRttMs;
-        }
-
-        return success == 0
-                ? new PingStats(configured, 0, timeout, null, null, null)
-                : new PingStats(configured, success, timeout, min, max, sum / (double) success);
-    }
-
-    private static String formatPingSummary(PingStats stats) {
-        if (stats.configuredPoints() == 0) {
-            return "not configured";
-        }
-        if (stats.successCount() == 0) {
-            return "0/" + stats.configuredPoints() + " (all timeout)";
-        }
-        return String.format(
-                Locale.ROOT,
-                "%d/%d (avg %.1fms, max %dms)",
-                stats.successCount(),
-                stats.configuredPoints(),
-                stats.avgMs(),
-                stats.maxMs());
     }
 
     private static FontPack loadFonts() throws Exception {
