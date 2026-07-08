@@ -51,12 +51,16 @@ public final class PdfReportGenerator {
     private static final DateTimeFormatter TIMESTAMP_FORMAT =
             DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss").withZone(ZoneId.systemDefault());
     private static final List<String> BIZ_UD_REGULAR_FILES = List.of(
+            "BIZ-UDGothicR.ttc",
+            "BIZ-UDPGothicR.ttc",
             "BIZUDGothic-Regular.ttf",
             "BIZUDPGothic-Regular.ttf",
             "YuGothR.ttc",
             "msgothic.ttc"
     );
     private static final List<String> BIZ_UD_BOLD_FILES = List.of(
+            "BIZ-UDGothicB.ttc",
+            "BIZ-UDPGothicB.ttc",
             "BIZUDGothic-Bold.ttf",
             "BIZUDPGothic-Bold.ttf",
             "YuGothB.ttc"
@@ -78,7 +82,7 @@ public final class PdfReportGenerator {
 
     public static void generate(ReportData data, File file) throws Exception {
         FontPack fonts = loadFonts();
-        Document document = new Document(PageSize.A4, 32, 32, 30, 30);
+        Document document = new Document(PageSize.A4.rotate(), 28, 28, 30, 28);
         try (FileOutputStream fos = new FileOutputStream(file)) {
             PdfWriter.getInstance(document, fos);
             document.open();
@@ -102,16 +106,18 @@ public final class PdfReportGenerator {
     }
 
     private static void addTitleBlock(Document document, ReportData data, FontPack fonts) throws Exception {
-        document.add(new Paragraph(Messages.get("report.title"), fonts.title()));
+        Paragraph title = new Paragraph(Messages.get("report.title"), fonts.title());
+        title.setSpacingAfter(6);
+        document.add(title);
         document.add(new Paragraph(Messages.get("report.generatedAtLabel") + " " + formatInstant(data.generatedAt()), fonts.body()));
         document.add(new Paragraph(safe(data.interfaceDescription()), fonts.body()));
         document.add(new Paragraph(" ", fonts.body()));
     }
 
     private static void addExecutiveSummary(Document document, ReportData data, FontPack fonts) throws Exception {
-        document.add(new Paragraph("Executive Summary", fonts.heading()));
+        addSectionHeading(document, "Executive Summary", fonts);
         PdfPTable summary = new PdfPTable(2);
-        summary.setWidthPercentage(100);
+        styleTable(summary, 0);
         summary.setWidths(new float[]{30, 70});
 
         List<ApSnapshot> aps = data.accessPoints() == null ? List.of() : data.accessPoints();
@@ -137,21 +143,22 @@ public final class PdfReportGenerator {
         if (data.floorPlanSnapshot() == null) {
             return;
         }
-        document.add(new Paragraph(Messages.get("report.section.floorPlanHeatmap"), fonts.heading()));
+        addSectionHeading(document, Messages.get("report.section.floorPlanHeatmap"), fonts);
         document.add(new Paragraph(
                 "Snapshot of the Site Survey canvas (floor plan + heatmap + recorded points).",
                 fonts.body()));
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
         ImageIO.write(SwingFXUtils.fromFXImage(data.floorPlanSnapshot(), null), "png", baos);
         org.openpdf.text.Image img = org.openpdf.text.Image.getInstance(baos.toByteArray());
-        img.scaleToFit(520, 380);
+        img.scaleToFit(720, 360);
+        img.setAlignment(Element.ALIGN_CENTER);
         document.add(img);
         document.add(new Paragraph(" ", fonts.body()));
     }
 
     private static void addAccessPointSection(Document document, ReportData data, FontPack fonts) throws Exception {
         List<ApSnapshot> aps = data.accessPoints() == null ? List.of() : data.accessPoints();
-        document.add(new Paragraph(Messages.get("report.section.apList"), fonts.heading()));
+        addSectionHeading(document, Messages.get("report.section.apList"), fonts);
         if (aps.isEmpty()) {
             document.add(new Paragraph("No access points were captured at export time.", fonts.body()));
             document.add(new Paragraph(" ", fonts.body()));
@@ -159,7 +166,7 @@ public final class PdfReportGenerator {
         }
 
         PdfPTable apTable = new PdfPTable(10);
-        apTable.setWidthPercentage(100);
+        styleTable(apTable, 1);
         apTable.setWidths(new float[]{3, 14, 17, 8, 7, 8, 8, 13, 12, 8});
         for (String h : new String[]{
                 "#", "SSID", "BSSID", "Band/Ch", "Freq", "RSSI", "Quality", "PHY", "Security", "Util"
@@ -194,14 +201,14 @@ public final class PdfReportGenerator {
 
     private static void addSecuritySection(Document document, ReportData data, FontPack fonts) throws Exception {
         List<ApSnapshot> aps = data.accessPoints() == null ? List.of() : data.accessPoints();
-        document.add(new Paragraph(Messages.get("report.section.securitySummary"), fonts.heading()));
+        addSectionHeading(document, Messages.get("report.section.securitySummary"), fonts);
 
         Map<SecurityType, Long> byType = new EnumMap<>(SecurityType.class);
         for (ApSnapshot ap : aps) {
             byType.merge(ap.securityType(), 1L, Long::sum);
         }
         PdfPTable summaryTable = new PdfPTable(3);
-        summaryTable.setWidthPercentage(100);
+        styleTable(summaryTable, 1);
         summaryTable.setWidths(new float[]{46, 20, 34});
         summaryTable.addCell(headerCell(Messages.get("report.column.type"), fonts.bodyBold()));
         summaryTable.addCell(headerCell(Messages.get("report.column.count"), fonts.bodyBold()));
@@ -227,7 +234,7 @@ public final class PdfReportGenerator {
         }
 
         PdfPTable findingsTable = new PdfPTable(5);
-        findingsTable.setWidthPercentage(100);
+        styleTable(findingsTable, 1);
         findingsTable.setWidths(new float[]{20, 24, 20, 10, 26});
         for (String h : new String[]{"SSID", "BSSID", "Type", "Band", "Notes"}) {
             findingsTable.addCell(headerCell(h, fonts.bodyBold()));
@@ -247,7 +254,7 @@ public final class PdfReportGenerator {
 
     private static void addChannelSection(Document document, ReportData data, FontPack fonts) throws Exception {
         List<ApSnapshot> aps = data.accessPoints() == null ? List.of() : data.accessPoints();
-        document.add(new Paragraph(Messages.get("report.section.channelRecommendation"), fonts.heading()));
+        addSectionHeading(document, Messages.get("report.section.channelRecommendation"), fonts);
         if (aps.isEmpty()) {
             document.add(new Paragraph("No AP data is available for channel analysis.", fonts.body()));
             document.add(new Paragraph(" ", fonts.body()));
@@ -255,7 +262,7 @@ public final class PdfReportGenerator {
         }
 
         PdfPTable recTable = new PdfPTable(4);
-        recTable.setWidthPercentage(100);
+        styleTable(recTable, 1);
         recTable.setWidths(new float[]{20, 28, 22, 30});
         recTable.addCell(headerCell(Messages.get("report.column.band"), fonts.bodyBold()));
         recTable.addCell(headerCell(Messages.get("report.column.recommendedChannel"), fonts.bodyBold()));
@@ -287,7 +294,7 @@ public final class PdfReportGenerator {
 
         document.add(new Paragraph("Channel score details (higher score = more congestion):", fonts.bodyBold()));
         PdfPTable detailTable = new PdfPTable(5);
-        detailTable.setWidthPercentage(100);
+        styleTable(detailTable, 1);
         detailTable.setWidths(new float[]{14, 10, 14, 10, 52});
         for (String h : new String[]{"Band", "Ch", "Score", "APs", "Top Contributor"}) {
             detailTable.addCell(headerCell(h, fonts.bodyBold()));
@@ -330,7 +337,7 @@ public final class PdfReportGenerator {
 
     private static void addSurveyPointSection(Document document, ReportData data, FontPack fonts) throws Exception {
         List<SurveyPoint> points = data.surveyPoints() == null ? List.of() : data.surveyPoints();
-        document.add(new Paragraph(Messages.get("report.section.surveyPoints"), fonts.heading()));
+        addSectionHeading(document, Messages.get("report.section.surveyPoints"), fonts);
         if (points.isEmpty()) {
             document.add(new Paragraph("No survey points were recorded.", fonts.body()));
             document.add(new Paragraph(" ", fonts.body()));
@@ -339,7 +346,7 @@ public final class PdfReportGenerator {
 
         PingStats pingStats = computePingStats(points);
         PdfPTable summary = new PdfPTable(2);
-        summary.setWidthPercentage(100);
+        styleTable(summary, 0);
         summary.setWidths(new float[]{30, 70});
         addSummaryRow(summary, "Total Points", String.valueOf(points.size()), fonts);
         addSummaryRow(summary, "Ping Configured Points", String.valueOf(pingStats.configuredPoints()), fonts);
@@ -353,7 +360,7 @@ public final class PdfReportGenerator {
         document.add(summary);
 
         PdfPTable detail = new PdfPTable(6);
-        detail.setWidthPercentage(100);
+        styleTable(detail, 1);
         detail.setWidths(new float[]{4, 19, 16, 12, 14, 35});
         for (String h : new String[]{"#", "Timestamp", "Position", "Visible APs", "Strongest RSSI", "Ping"}) {
             detail.addCell(headerCell(h, fonts.bodyBold()));
@@ -384,16 +391,36 @@ public final class PdfReportGenerator {
         table.addCell(cell(value, fonts.mono()));
     }
 
+    private static void addSectionHeading(Document document, String text, FontPack fonts) throws Exception {
+        Paragraph heading = new Paragraph(text, fonts.heading());
+        heading.setSpacingBefore(8);
+        heading.setSpacingAfter(5);
+        document.add(heading);
+    }
+
+    private static void styleTable(PdfPTable table, int headerRows) {
+        table.setWidthPercentage(100);
+        table.setSpacingBefore(3);
+        table.setSpacingAfter(8);
+        table.setSplitLate(false);
+        table.setSplitRows(true);
+        if (headerRows > 0) {
+            table.setHeaderRows(headerRows);
+        }
+    }
+
     private static PdfPCell headerCell(String text, Font font) {
         PdfPCell cell = new PdfPCell(new Phrase(text, font));
         cell.setBackgroundColor(new Color(0xE0, 0xE0, 0xE0));
         cell.setHorizontalAlignment(Element.ALIGN_LEFT);
+        cell.setVerticalAlignment(Element.ALIGN_MIDDLE);
         cell.setPadding(4);
         return cell;
     }
 
     private static PdfPCell cell(String text, Font font) {
         PdfPCell cell = new PdfPCell(new Phrase(safe(text), font));
+        cell.setVerticalAlignment(Element.ALIGN_MIDDLE);
         cell.setPadding(3);
         return cell;
     }
@@ -507,12 +534,12 @@ public final class PdfReportGenerator {
             monoBase = bodyBase;
         }
 
-        Font title = new Font(boldBase, 17, Font.BOLD);
-        Font heading = new Font(boldBase, 12, Font.BOLD);
-        Font body = new Font(bodyBase, 9);
-        Font bodyBold = new Font(boldBase, 9, Font.BOLD);
-        Font mono = new Font(monoBase, 8);
-        Font disclaimer = new Font(bodyBase, 7, Font.ITALIC, Color.GRAY);
+        Font title = new Font(boldBase, 18, Font.BOLD);
+        Font heading = new Font(boldBase, 11, Font.BOLD);
+        Font body = new Font(bodyBase, 8.5f);
+        Font bodyBold = new Font(boldBase, 8.5f, Font.BOLD);
+        Font mono = new Font(monoBase, 8f);
+        Font disclaimer = new Font(bodyBase, 7.5f, Font.ITALIC, Color.GRAY);
         return new FontPack(title, heading, body, bodyBold, mono, disclaimer);
     }
 
@@ -544,7 +571,12 @@ public final class PdfReportGenerator {
             for (String fileName : fileNames) {
                 File f = new File(root, fileName);
                 if (f.isFile()) {
-                    candidates.add(f.getAbsolutePath());
+                    String path = f.getAbsolutePath();
+                    if (fileName.toLowerCase(Locale.ROOT).endsWith(".ttc")) {
+                        candidates.add(path + ",0");
+                        candidates.add(path + ",1");
+                    }
+                    candidates.add(path);
                 }
             }
         }

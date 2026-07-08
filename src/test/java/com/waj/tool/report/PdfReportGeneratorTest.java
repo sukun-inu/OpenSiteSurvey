@@ -38,7 +38,9 @@ class PdfReportGeneratorTest {
         assertTrue(raw.contains("/Type0"),
                 "PDF should declare a Type0 (composite/CID-keyed) font for the CJK text");
         assertTrue(
-                raw.contains("BIZUD") || raw.contains("HeiseiKakuGo-W5"),
+                raw.contains("BIZ-UDGothic") || raw.contains("HeiseiKakuGo-W5"),
                 "PDF should reference either a BIZ UD font or the CJK fallback font");
+        assertTrue(raw.contains("Consolas") || raw.contains("BIZ-UDGothic") || raw.contains("HeiseiKakuGo-W5"),
+                "PDF should reference a monospace-capable font for numeric fields, or a safe fallback");
     }
 }

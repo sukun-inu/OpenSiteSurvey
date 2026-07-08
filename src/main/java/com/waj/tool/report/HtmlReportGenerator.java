@@ -30,20 +30,24 @@ public final class HtmlReportGenerator {
     }
 
     public static void generate(ReportData data, File file) throws IOException {
+        List<ApSnapshot> aps = data.accessPoints() == null ? List.of() : data.accessPoints();
+        List<SurveyPoint> points = data.surveyPoints() == null ? List.of() : data.surveyPoints();
         StringBuilder html = new StringBuilder();
         html.append("<!doctype html><html><head><meta charset='utf-8'><title>Wi-Fi Site Survey Report</title><style>")
-                .append("body{font-family:'BIZ UDPGothic','BIZ UDGothic','Yu Gothic UI','Segoe UI',sans-serif;margin:24px;color:#222;}")
+                .append("@page{size:A4 landscape;margin:12mm;}")
+                .append("body{font-family:'BIZ UDPGothic','BIZ UDGothic','BIZ UDゴシック','Yu Gothic UI','Segoe UI',sans-serif;margin:24px;color:#222;}")
                 .append("h1{font-size:20px;margin:0;} h2{font-size:16px;border-bottom:2px solid #333;padding-bottom:4px;margin-top:32px;}")
                 .append(".meta{margin-top:8px;}")
                 .append(".summary{margin-top:14px;display:grid;grid-template-columns:220px 1fr;gap:6px 12px;max-width:840px;}")
                 .append(".summary .k{font-weight:700;background:#f3f4f6;padding:4px 8px;border:1px solid #d8dde3;}")
                 .append(".summary .v{padding:4px 8px;border:1px solid #d8dde3;}")
                 .append("table{border-collapse:collapse;width:100%;margin-top:8px;}")
-                .append("th,td{border:1px solid #ccc;padding:6px 8px;font-size:12px;text-align:left;}")
+                .append("th,td{border:1px solid #ccc;padding:5px 7px;font-size:11.5px;text-align:left;vertical-align:top;}")
                 .append("th{background:#f0f0f0;}")
                 .append(".risk-high{background:#e74c3c;color:white;} .risk-medium{background:#f1c40f;} .risk-low{background:#2ecc71;color:white;}")
-                .append(".mono{font-family:'Consolas','Cascadia Mono','BIZ UDGothic',monospace;}")
+                .append(".mono{font-family:'Consolas','Cascadia Mono','BIZ UDGothic','BIZ UDゴシック',monospace;white-space:nowrap;}")
                 .append("img.floorplan{max-width:100%;border:1px solid #999;margin-top:8px;}")
+                .append("@media print{body{margin:0;}h2,h3{break-after:avoid;}tr{break-inside:avoid;}table{page-break-inside:auto;}}")
                 .append("</style></head><body>");
 
         html.append("<h1>").append(Messages.get("report.title")).append("</h1>");
@@ -66,7 +70,7 @@ public final class HtmlReportGenerator {
                 .append("</th><th>Freq</th><th>RSSI</th><th>Quality</th><th>PHY</th><th>")
                 .append(Messages.get("report.column.security")).append("</th><th>Util</th></tr>");
         int apIndex = 1;
-        for (ApSnapshot ap : data.accessPoints()) {
+        for (ApSnapshot ap : aps) {
             html.append("<tr><td class='mono'>").append(apIndex++).append("</td><td>")
                     .append(escape(ap.ssid().isEmpty() ? "<hidden>" : ap.ssid())).append("</td><td class='mono'>")
                     .append(escape(ap.bssid())).append("</td><td class='mono'>").append(ap.band()).append(" / ").append(ap.channel())
@@ -81,7 +85,7 @@ public final class HtmlReportGenerator {
 
         html.append("<h2>").append(Messages.get("report.section.securitySummary")).append("</h2>");
         Map<SecurityType, Long> bySec = new EnumMap<>(SecurityType.class);
-        for (ApSnapshot ap : data.accessPoints()) {
+        for (ApSnapshot ap : aps) {
             bySec.merge(ap.securityType(), 1L, Long::sum);
         }
         html.append("<table><tr><th>").append(Messages.get("report.column.type")).append("</th><th>")
@@ -94,7 +98,7 @@ public final class HtmlReportGenerator {
 
         html.append("<h3 style='margin-top:12px;'>Findings (requires review)</h3><table><tr><th>SSID</th><th>BSSID</th><th>Type</th><th>Band</th><th>Notes</th></tr>");
         boolean hasFinding = false;
-        for (ApSnapshot ap : data.accessPoints()) {
+        for (ApSnapshot ap : aps) {
             if (ap.securityType().riskLevel() == SecurityType.RiskLevel.LOW) {
                 continue;
             }
@@ -114,7 +118,7 @@ public final class HtmlReportGenerator {
                 .append("</th><th>").append(Messages.get("report.column.congestionScore")).append("</th><th>Observed Channels</th></tr>");
         Map<String, ChannelPlanner.Recommendation> recByBand = new LinkedHashMap<>();
         for (String band : BANDS) {
-            List<ApSnapshot> inBand = data.accessPoints().stream().filter(a -> a.band().equals(band)).toList();
+            List<ApSnapshot> inBand = aps.stream().filter(a -> a.band().equals(band)).toList();
             if (inBand.isEmpty()) {
                 continue;
             }
@@ -133,14 +137,14 @@ public final class HtmlReportGenerator {
         for (Map.Entry<String, ChannelPlanner.Recommendation> e : recByBand.entrySet()) {
             String band = e.getKey();
             ChannelPlanner.Recommendation rec = e.getValue();
-            List<Integer> inUse = data.accessPoints().stream()
+            List<Integer> inUse = aps.stream()
                     .filter(ap -> ap.band().equals(band))
                     .map(ApSnapshot::channel)
                     .distinct()
                     .sorted((a, b) -> Double.compare(rec.allScores().getOrDefault(b, 0.0), rec.allScores().getOrDefault(a, 0.0)))
                     .toList();
             for (Integer ch : inUse) {
-                long apCount = data.accessPoints().stream().filter(ap -> ap.band().equals(band) && ap.channel() == ch).count();
+                long apCount = aps.stream().filter(ap -> ap.band().equals(band) && ap.channel() == ch).count();
                 ChannelPlanner.Recommendation.ApContribution top = rec.perChannelContributions().getOrDefault(ch, List.of())
                         .stream().max(java.util.Comparator.comparingDouble(ChannelPlanner.Recommendation.ApContribution::contribution))
                         .orElse(null);
@@ -154,12 +158,12 @@ public final class HtmlReportGenerator {
         }
         html.append("</table>");
 
-        if (!data.surveyPoints().isEmpty()) {
-            appendSurveyPointSummary(html, data.surveyPoints());
+        if (!points.isEmpty()) {
+            appendSurveyPointSummary(html, points);
             html.append("<h2>").append(Messages.get("report.section.surveyPoints")).append("</h2><table><tr><th>#</th><th>Time</th><th>")
                     .append(Messages.get("report.column.coordinates")).append("</th><th>Visible APs</th><th>Strongest RSSI</th><th>Ping</th></tr>");
             int i = 1;
-            for (SurveyPoint p : data.surveyPoints()) {
+            for (SurveyPoint p : points) {
                 String ping = p.pingRttMs != null ? escape(p.pingHost) + ": " + p.pingRttMs + "ms" : "-";
                 int visible = p.rssiByBssid == null ? 0 : p.rssiByBssid.size();
                 Integer strongest = p.rssiByBssid == null ? null : p.rssiByBssid.values().stream().max(Integer::compareTo).orElse(null);
@@ -182,8 +186,8 @@ public final class HtmlReportGenerator {
     }
 
     private static void appendExecutiveSummary(StringBuilder html, ReportData data) {
-        List<ApSnapshot> aps = data.accessPoints();
-        List<SurveyPoint> points = data.surveyPoints();
+        List<ApSnapshot> aps = data.accessPoints() == null ? List.of() : data.accessPoints();
+        List<SurveyPoint> points = data.surveyPoints() == null ? List.of() : data.surveyPoints();
         long high = aps.stream().filter(a -> a.securityType().riskLevel() == SecurityType.RiskLevel.HIGH).count();
         long medium = aps.stream().filter(a -> a.securityType().riskLevel() == SecurityType.RiskLevel.MEDIUM).count();
         String bands = aps.stream().map(ApSnapshot::band).distinct().sorted().collect(Collectors.joining(", "));
@@ -262,6 +266,9 @@ public final class HtmlReportGenerator {
     }
 
     private static String escape(String s) {
+        if (s == null) {
+            return "";
+        }
         return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;");
     }
 }
