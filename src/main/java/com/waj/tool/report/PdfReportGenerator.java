@@ -127,15 +127,17 @@ public final class PdfReportGenerator {
         if (data.floorPlanSnapshot() == null) {
             return;
         }
+        document.newPage();
         addSectionHeading(document, Messages.get("report.section.floorPlanHeatmap"), fonts);
         document.add(new Paragraph(Messages.get("report.message.floorPlanSnapshot"), fonts.body()));
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
         ImageIO.write(SwingFXUtils.fromFXImage(data.floorPlanSnapshot(), null), "png", baos);
         org.openpdf.text.Image img = org.openpdf.text.Image.getInstance(baos.toByteArray());
-        img.scaleToFit(720, 360);
+        img.scaleToFit(760, 440);
         img.setAlignment(Element.ALIGN_CENTER);
         document.add(img);
         document.add(new Paragraph(" ", fonts.body()));
+        document.newPage();
     }
 
     private static void addAccessPointSection(Document document, ReportData data, FontPack fonts) throws Exception {
