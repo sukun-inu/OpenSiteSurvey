@@ -8,6 +8,7 @@ import com.waj.tool.util.CategoricalColorPalette;
 import com.waj.tool.util.MonoTableCells;
 import com.waj.tool.util.RiskColors;
 import com.waj.tool.util.TooltipSupport;
+import com.waj.tool.util.VendorLookup;
 import javafx.beans.property.ReadOnlyObjectWrapper;
 import javafx.collections.FXCollections;
 import javafx.collections.ObservableList;
@@ -80,6 +81,14 @@ public final class SecurityAuditView {
         bssidCol.setCellValueFactory(d -> new ReadOnlyObjectWrapper<>(d.getValue().bssid()));
         bssidCol.setPrefWidth(140);
 
+        // Surfaced here (not just on Dashboard) because vendor mismatch is a security-relevant
+        // signal: an AP claiming a trusted SSID from an unexpected hardware vendor's OUI is a
+        // classic evil-twin/rogue-AP tell, worth a quick visual scan alongside the security type.
+        TableColumn<ApSnapshot, String> vendorCol = new TableColumn<>(Messages.get("dashboard.column.vendor"));
+        vendorCol.setCellValueFactory(d -> new ReadOnlyObjectWrapper<>(
+                java.util.Objects.requireNonNullElse(VendorLookup.vendorFor(d.getValue().bssid()), "")));
+        vendorCol.setPrefWidth(150);
+
         TableColumn<ApSnapshot, String> bandCol = new TableColumn<>("Band/Ch");
         bandCol.setCellValueFactory(d -> new ReadOnlyObjectWrapper<>(d.getValue().band() + " / ch" + d.getValue().channel()));
         bandCol.setPrefWidth(110);
@@ -106,7 +115,7 @@ public final class SecurityAuditView {
             }
         });
 
-        table.getColumns().setAll(List.of(colorCol, ssidCol, bssidCol, bandCol, rssiCol, secCol));
+        table.getColumns().setAll(List.of(colorCol, ssidCol, bssidCol, vendorCol, bandCol, rssiCol, secCol));
         table.setItems(items);
         table.setPlaceholder(new Label(Messages.get("common.status.waitingForScan")));
         table.setRowFactory(tv -> {

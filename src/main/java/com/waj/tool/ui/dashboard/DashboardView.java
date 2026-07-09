@@ -11,6 +11,7 @@ import com.waj.tool.util.CategoricalColorPalette;
 import com.waj.tool.util.MonoTableCells;
 import com.waj.tool.util.NoiseEstimator;
 import com.waj.tool.util.TooltipSupport;
+import com.waj.tool.util.VendorLookup;
 import javafx.application.Platform;
 import javafx.beans.property.BooleanProperty;
 import javafx.beans.property.ReadOnlyObjectWrapper;
@@ -217,6 +218,15 @@ public final class DashboardView {
         bssidCol.setCellValueFactory(d -> new ReadOnlyObjectWrapper<>(d.getValue().bssid()));
         bssidCol.setPrefWidth(130);
 
+        // From the OUI (first 3 bytes) of the BSSID - see VendorLookup's own javadoc for why this
+        // is a bundled static snapshot rather than a live lookup. Blank (not "N/A") for
+        // locally-administered/unregistered prefixes, since that's the common case for randomized
+        // MACs and isn't itself noteworthy enough to call out per row.
+        TableColumn<ApSnapshot, String> vendorCol = new TableColumn<>(Messages.get("dashboard.column.vendor"));
+        vendorCol.setCellValueFactory(d -> new ReadOnlyObjectWrapper<>(
+                java.util.Objects.requireNonNullElse(VendorLookup.vendorFor(d.getValue().bssid()), "")));
+        vendorCol.setPrefWidth(150);
+
         TableColumn<ApSnapshot, Number> channelCol = new TableColumn<>("Ch");
         channelCol.setCellValueFactory(d -> new ReadOnlyObjectWrapper<>(d.getValue().channel()));
         channelCol.setPrefWidth(45);
@@ -254,7 +264,7 @@ public final class DashboardView {
         securityCol.setCellValueFactory(d -> new ReadOnlyObjectWrapper<>(d.getValue().securityType().label()));
         securityCol.setPrefWidth(110);
 
-        apTable.getColumns().setAll(List.of(colorCol, visibleCol, ssidCol, bssidCol, channelCol, bandCol,
+        apTable.getColumns().setAll(List.of(colorCol, visibleCol, ssidCol, bssidCol, vendorCol, channelCol, bandCol,
                 rssiCol, qualityCol, utilizationCol, phyCol, securityCol));
         apTable.setEditable(true);
         apTable.setItems(apItems);

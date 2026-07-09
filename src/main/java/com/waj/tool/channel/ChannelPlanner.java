@@ -10,10 +10,12 @@ import java.util.TreeMap;
 /**
  * Heuristic channel-congestion scoring and recommendation - not a rigorous RF propagation model,
  * but the same spirit of "sum of nearby signal strength weighted by channel overlap" used by
- * consumer Wi-Fi analyzer tools. For 2.4GHz, adjacent channels within 4 of each other are treated
- * as overlapping with a triangular falloff (channels are only 5MHz apart but each occupies about
- * 22MHz). For 5/6GHz, channels are treated as independent (only an exact-channel match counts),
- * since those bands are normally deployed non-overlapping.
+ * consumer Wi-Fi analyzer tools. For 2.4GHz, adjacent channels are treated as overlapping with a
+ * triangular falloff (channels are only 5MHz apart but each occupies about 22MHz). For 5/6GHz,
+ * a plain 20MHz AP only overlaps its exact channel, since those bands are normally deployed
+ * non-overlapping - but an AP actually operating a wider HT40/VHT80/VHT160 channel (see {@link
+ * ChannelWidthParser}) is scored as overlapping every candidate channel within its real occupied
+ * width, not just its single reported primary channel.
  *
  * <p>When an AP reports real channel utilization (802.11 BSS Load element, {@link
  * ApSnapshot#channelUtilizationPercent()}), that measured value is blended 50/50 with the
@@ -69,8 +71,17 @@ public final class ChannelPlanner {
     public record Recommendation(int channel, double score, Map<Integer, Double> allScores,
                                   Map<Integer, List<ApContribution>> perChannelContributions) {
 
-        /** One AP's share of a single channel's congestion score. */
-        public record ApContribution(String bssid, String ssid, double weight, double contribution,
+        /**
+         * One AP's share of a single channel's congestion score.
+         *
+         * @param homeChannel the AP's own reported primary channel - NOT necessarily the channel
+         *                    this contribution is scored against (a wide HT40/VHT80/160 AP scores
+         *                    non-zero, weight &lt; 1.0 contributions against every channel it
+         *                    overlaps, but only ever "lives" on one). Callers that want to draw an
+         *                    AP's own occupancy curve, as opposed to reading its congestion
+         *                    contribution, should match on this rather than on {@code weight}.
+         */
+        public record ApContribution(String bssid, String ssid, int homeChannel, double weight, double contribution,
                                       Integer utilizationPercent) {
         }
     }
@@ -122,9 +133,15 @@ public final class ChannelPlanner {
             if (!ap.band().equals(band)) {
                 continue;
             }
-            double weight = band.equals("2.4GHz")
-                    ? Math.max(0, 1.0 - Math.abs(ap.channel() - channel) / 4.0)
-                    : (ap.channel() == channel ? 1.0 : 0.0);
+            // Distance is measured from the AP's *effective* center (its primary channel for a
+            // plain 20MHz AP, or the HT40/VHT80/VHT160 block's actual center otherwise - see
+            // ChannelWidthParser), and the falloff radius scales with channelWidthMhz so a wider
+            // AP is correctly treated as overlapping more of the band than a 20MHz one at the same
+            // position. widthFactor is 1.0 for the (overwhelmingly common) plain 20MHz case, which
+            // makes this reduce to exactly the previous fixed-radius formula for both bands.
+            double widthFactor = ap.channelWidthMhz() / 20.0;
+            double falloffRadius = (band.equals("2.4GHz") ? 4.0 : 2.0) * widthFactor;
+            double weight = Math.max(0, 1.0 - Math.abs(ap.effectiveCenterChannel() - channel) / falloffRadius);
             if (weight <= 0) {
                 continue;
             }
@@ -134,7 +151,7 @@ public final class ChannelPlanner {
             double contribution = weight * combined;
             total += contribution;
             contributions.add(new Recommendation.ApContribution(
-                    ap.bssid(), ap.ssid(), weight, contribution, utilization));
+                    ap.bssid(), ap.ssid(), ap.channel(), weight, contribution, utilization));
         }
         return new ScoreResult(total, contributions);
     }

@@ -271,17 +271,20 @@ public final class ChannelPlanningView {
         for (int channel : group.channels()) {
             List<ChannelPlanner.Recommendation.ApContribution> contributions =
                     rec.perChannelContributions().getOrDefault(channel, List.of());
-            // Only draw a curve for an AP that's *literally* on this channel (weight == 1.0). For
-            // 2.4GHz, ChannelPlanner also records a reduced-weight "contribution" from each nearby
-            // *overlapping* channel for scoring purposes (e.g. an AP on channel 1 also nudges
-            // channels 2-4's congestion score, since their 22MHz-wide channels overlap) - that's
-            // correct for the score, but drawing a full occupancy curve on every one of those
-            // nearby channels too made it look like the same AP was broadcasting on all of them,
-            // when really only one channel is where it actually sits. The hover breakdown
-            // (showChannelBreakdown) still surfaces those secondary contributions on hover - this
-            // filter only affects which entries get their own drawn curve.
+            // Only draw a curve for an AP that's *literally* on this channel (its own reported
+            // primary channel, i.e. ApContribution.homeChannel() - NOT weight == 1.0: a wide
+            // HT40/VHT80/160 AP's effective center can differ from its primary channel, so its
+            // peak weight may land on a channel it isn't actually reporting as home). ChannelPlanner
+            // also records a reduced-weight "contribution" from each nearby *overlapping* channel
+            // for scoring purposes (e.g. an AP on channel 1 also nudges channels 2-4's congestion
+            // score, since their 22MHz-wide channels overlap) - that's correct for the score, but
+            // drawing a full occupancy curve on every one of those nearby channels too made it look
+            // like the same AP was broadcasting on all of them, when really only one channel is
+            // where it actually sits. The hover breakdown (showChannelBreakdown) still surfaces
+            // those secondary contributions on hover - this filter only affects which entries get
+            // their own drawn curve.
             List<ChannelPlanner.Recommendation.ApContribution> onThisChannel = contributions.stream()
-                    .filter(c -> c.weight() >= 1.0)
+                    .filter(c -> c.homeChannel() == channel)
                     .toList();
             if (onThisChannel.isEmpty()) {
                 continue;

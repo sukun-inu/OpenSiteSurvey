@@ -2,14 +2,20 @@ package com.waj.tool.persistence;
 
 import com.waj.tool.model.ApSnapshot;
 import com.waj.tool.model.ScanSnapshot;
+import com.waj.tool.util.CsvUtil;
 
 import java.io.File;
+import java.io.IOException;
+import java.io.Writer;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -204,6 +210,57 @@ public final class ScanLogDatabase implements AutoCloseable {
                 "WHERE id IN (SELECT MAX(id) FROM scan_samples WHERE ts_epoch_ms BETWEEN ? AND ? GROUP BY bssid) " +
                 "ORDER BY bssid";
         return queryBssidLabels(sql, fromEpochMilli, toEpochMilli);
+    }
+
+    /**
+     * Streams every row in [fromEpochMilli, toEpochMilli] (optionally filtered to one BSSID)
+     * straight to a CSV file, bypassing {@link #MAX_QUERY_ROWS} - {@link #querySamples} caps at
+     * 5000 rows to keep the History table/chart responsive, but a full-range audit export (e.g. a
+     * 7-day range across many APs) can legitimately be far larger, so this reads the {@link
+     * ResultSet} row-by-row rather than materializing it as a {@code List<ScanSampleRow>} first.
+     */
+    public synchronized long exportSamplesToCsv(long fromEpochMilli, long toEpochMilli, String bssidFilter, File file)
+            throws IOException {
+        String sql = "SELECT ts_epoch_ms,bssid,ssid,channel,band,rssi,link_quality,phy_type,security FROM scan_samples " +
+                "WHERE ts_epoch_ms BETWEEN ? AND ?" +
+                (bssidFilter != null && !bssidFilter.isEmpty() ? " AND bssid = ?" : "") +
+                " ORDER BY ts_epoch_ms DESC";
+        try (PreparedStatement ps = connection.prepareStatement(sql);
+             Writer writer = Files.newBufferedWriter(file.toPath(), StandardCharsets.UTF_8)) {
+            ps.setLong(1, fromEpochMilli);
+            ps.setLong(2, toEpochMilli);
+            if (bssidFilter != null && !bssidFilter.isEmpty()) {
+                ps.setString(3, bssidFilter);
+            }
+            writer.write("timestamp,ssid,bssid,channel,band,rssi_dbm,link_quality,phy_type,security\n");
+            long rowCount = 0;
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    writer.write(Instant.ofEpochMilli(rs.getLong("ts_epoch_ms")).toString());
+                    writer.write(',');
+                    writer.write(CsvUtil.escapeField(rs.getString("ssid")));
+                    writer.write(',');
+                    writer.write(CsvUtil.escapeField(rs.getString("bssid")));
+                    writer.write(',');
+                    writer.write(Integer.toString(rs.getInt("channel")));
+                    writer.write(',');
+                    writer.write(CsvUtil.escapeField(rs.getString("band")));
+                    writer.write(',');
+                    writer.write(Integer.toString(rs.getInt("rssi")));
+                    writer.write(',');
+                    writer.write(Integer.toString(rs.getInt("link_quality")));
+                    writer.write(',');
+                    writer.write(CsvUtil.escapeField(rs.getString("phy_type")));
+                    writer.write(',');
+                    writer.write(CsvUtil.escapeField(rs.getString("security")));
+                    writer.write('\n');
+                    rowCount++;
+                }
+            }
+            return rowCount;
+        } catch (SQLException e) {
+            throw new IOException("scan_samples export failed", e);
+        }
     }
 
     private List<BssidLabel> queryBssidLabels(String sql, Long fromEpochMilli, Long toEpochMilli) {

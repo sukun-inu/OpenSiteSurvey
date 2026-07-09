@@ -6,15 +6,69 @@
   1. Runs the full Maven build (mvnw) to produce a fat/shaded jar.
   2. Uses the JDK bundled under .tools/jdk21 (jpackage) to bundle that jar with a
      trimmed Java runtime into a standalone app-image under dist/<version>/.
-  No system-wide JDK, Maven, or WiX installation is required.
+  3. With -Msi, also produces a single-file .msi installer. jpackage needs WiX
+     Toolset's candle.exe/light.exe for this - rather than requiring a system-wide
+     WiX install, this script downloads the portable WiX v3.11 binaries zip (no
+     installer of its own) into .tools/wix on first use, the same "vendor it
+     locally instead of installing system-wide" approach already used for the
+     JDK and Maven under .tools/. That download needs network access; skip -Msi
+     if you only want the (default, network-free) app-image build.
 
 .PARAMETER SkipTests
   Skip the test phase during the Maven build.
+
+.PARAMETER Msi
+  Also build a .msi installer (in addition to the app-image), via a vendored WiX Toolset.
 #>
 [CmdletBinding()]
 param(
-    [switch]$SkipTests
+    [switch]$SkipTests,
+    [switch]$Msi
 )
+
+# Fixed so every version's MSI shares one upgrade code - without this, jpackage generates a
+# random one per build and Windows would treat each version as an unrelated app (installing
+# side-by-side, no clean upgrade) instead of upgrading in place.
+$wixUpgradeCode = "5a05334e-e304-4445-b5b0-70848cbe7659"
+$wixVersion = "3.11.1"
+$wixZipUrl = "https://github.com/wixtoolset/wix3/releases/download/wix3111rtm/wix311-binaries.zip"
+
+function Ensure-Wix {
+    param([string]$RootDir)
+    $wixDir = Join-Path $RootDir ".tools\wix"
+    $candle = Join-Path $wixDir "candle.exe"
+    if (Test-Path $candle) {
+        return $wixDir
+    }
+    Write-Host "== Downloading WiX Toolset v$wixVersion binaries (one-time, into .tools/wix) ==" -ForegroundColor Cyan
+    New-Item -ItemType Directory -Path $wixDir -Force | Out-Null
+    $zipPath = Join-Path $RootDir "target\wix311-binaries.zip"
+    New-Item -ItemType Directory -Path (Split-Path $zipPath) -Force | Out-Null
+
+    # GitHub's release-asset redirect target has been observed to 504 transiently - retry a few
+    # times with a short backoff rather than failing the whole release build over a blip.
+    $lastError = $null
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        try {
+            Invoke-WebRequest -Uri $wixZipUrl -OutFile $zipPath -UseBasicParsing -TimeoutSec 60
+            $lastError = $null
+            break
+        } catch {
+            $lastError = $_
+            Write-Host "  download attempt $attempt/3 failed: $($_.Exception.Message)" -ForegroundColor Yellow
+            if ($attempt -lt 3) { Start-Sleep -Seconds 5 }
+        }
+    }
+    if ($lastError) {
+        throw "Failed to download WiX Toolset after 3 attempts: $lastError"
+    }
+    Expand-Archive -Path $zipPath -DestinationPath $wixDir -Force
+    Remove-Item $zipPath -Force
+    if (-not (Test-Path $candle)) {
+        throw "WiX download/extract succeeded but candle.exe is still missing from $wixDir"
+    }
+    return $wixDir
+}
 
 $ErrorActionPreference = "Stop"
 $root = $PSScriptRoot
@@ -72,7 +126,37 @@ $zipPath = Join-Path $distDir "$($appName -replace ' ', '-')-$version-win64.zip"
 if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
 Compress-Archive -Path $appImageDir -DestinationPath $zipPath
 
+$msiPath = $null
+if ($Msi) {
+    $wixDir = Ensure-Wix -RootDir $root
+    Write-Host "== Running jpackage (--type msi) ==" -ForegroundColor Cyan
+    # jpackage shells out to WiX's own candle.exe/light.exe rather than taking a path to them
+    # directly, so they need to be discoverable on PATH for this call.
+    $env:PATH = "$wixDir;$env:PATH"
+    & $jpackage `
+        --type msi `
+        --input $stagingDir `
+        --dest $distDir `
+        --name $appName `
+        --main-jar (Split-Path $shadedJar -Leaf) `
+        --main-class com.waj.tool.Launcher `
+        --app-version $appVersion `
+        --vendor "WAJ Tool" `
+        --description "TamoGraph-inspired Wi-Fi site survey tool" `
+        --win-menu `
+        --win-shortcut `
+        --win-dir-chooser `
+        --win-upgrade-uuid $wixUpgradeCode
+    if ($LASTEXITCODE -ne 0) { throw "jpackage --type msi failed (exit $LASTEXITCODE)" }
+    $msiPath = Join-Path $distDir "$appName-$appVersion.msi"
+}
+
 Write-Host "== Done ==" -ForegroundColor Green
 Write-Host "App image : $appImageDir"
 Write-Host "Zip       : $zipPath"
 Write-Host "Launcher  : $(Join-Path $appImageDir "$appName.exe")"
+if ($msiPath) {
+    Write-Host "MSI       : $msiPath"
+} else {
+    Write-Host "(Run with -Msi to also produce a .msi installer.)"
+}

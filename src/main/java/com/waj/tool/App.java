@@ -336,6 +336,9 @@ public class App extends Application {
     }
 
     public static void main(String[] args) {
+        if (HeadlessRunner.tryRun(args)) {
+            return;
+        }
         launch(args);
     }
 }

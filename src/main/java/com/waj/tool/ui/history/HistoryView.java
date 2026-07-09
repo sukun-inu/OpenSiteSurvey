@@ -24,6 +24,7 @@ import javafx.scene.control.Alert;
 import javafx.scene.control.Button;
 import javafx.scene.control.CheckBox;
 import javafx.scene.control.ComboBox;
+import javafx.scene.control.DatePicker;
 import javafx.scene.control.Label;
 import javafx.scene.control.ListCell;
 import javafx.scene.control.ListView;
@@ -31,6 +32,7 @@ import javafx.scene.control.ScrollPane;
 import javafx.scene.control.SplitPane;
 import javafx.scene.control.TableColumn;
 import javafx.scene.control.TableView;
+import javafx.scene.control.TextField;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
@@ -41,15 +43,22 @@ import javafx.stage.Stage;
 import javafx.util.StringConverter;
 
 import java.io.File;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.time.Instant;
+import java.time.LocalDate;
+import java.time.LocalTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /**
  * Long-term history browser backed by the SQLite scan log: pick a time range, optionally narrow
@@ -73,10 +82,34 @@ public final class HistoryView {
     private final ScanLogDatabase database;
     private final CategoricalColorPalette colorPalette;
 
+    private static final DateTimeFormatter TIME_FIELD_FORMATTER = DateTimeFormatter.ofPattern("HH:mm");
+
     private final Map<String, Long> rangeMillisByLabel = new LinkedHashMap<>();
     private final ComboBox<String> rangeSelector = new ComboBox<>();
     private final ComboBox<ScanLogDatabase.BssidLabel> bssidFilter = new ComboBox<>();
     private final Label statusLabel = new Label("");
+    private String customRangeLabel;
+
+    // Custom date-range controls (JavaFX has no built-in date-time picker): a DatePicker per
+    // endpoint plus a plain "HH:mm" TextField for the time-of-day component, combined at search
+    // time in the JVM's default zone. Only shown/enabled once "custom range" is selected in
+    // rangeSelector - see buildControls().
+    private final DatePicker fromDatePicker = new DatePicker(LocalDate.now());
+    private final TextField fromTimeField = new TextField("00:00");
+    private final DatePicker toDatePicker = new DatePicker(LocalDate.now());
+    private final TextField toTimeField = new TextField("23:59");
+    private final HBox customRangeBox = new HBox();
+    private final Button exportAllButton = new Button();
+
+    // Full-range CSV export streams straight from SQLite to disk (see
+    // ScanLogDatabase.exportSamplesToCsv) and can legitimately take a while over a multi-day
+    // range, so it runs off a background thread rather than blocking the JavaFX Application
+    // thread - same daemon-executor pattern SurveyView uses for its ping probes.
+    private final ExecutorService exportExecutor = Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "history-export");
+        t.setDaemon(true);
+        return t;
+    });
 
     private final NumberAxis xAxis = new NumberAxis();
     private final NumberAxis yAxis = new NumberAxis(-100, -20, 10);
@@ -177,8 +210,33 @@ public final class HistoryView {
         rangeMillisByLabel.put(Messages.get("history.range.1hour"), 60 * 60_000L);
         rangeMillisByLabel.put(Messages.get("history.range.24hours"), 24 * 60 * 60_000L);
         rangeMillisByLabel.put(Messages.get("history.range.7days"), 7L * 24 * 60 * 60_000L);
+        customRangeLabel = Messages.get("history.range.custom");
         rangeSelector.getItems().setAll(rangeMillisByLabel.keySet());
+        rangeSelector.getItems().add(customRangeLabel);
         rangeSelector.getSelectionModel().select(Messages.get("history.range.15min"));
+        rangeSelector.valueProperty().addListener((obs, old, val) -> {
+            boolean custom = customRangeLabel.equals(val);
+            customRangeBox.setVisible(custom);
+            customRangeBox.setManaged(custom);
+        });
+
+        fromDatePicker.setPrefWidth(130);
+        toDatePicker.setPrefWidth(130);
+        fromTimeField.setPromptText(Messages.get("history.time.prompt"));
+        toTimeField.setPromptText(Messages.get("history.time.prompt"));
+        fromTimeField.setPrefWidth(60);
+        toTimeField.setPrefWidth(60);
+        TooltipSupport.set(fromDatePicker, Messages.get("tooltip.history.fromDate"));
+        TooltipSupport.set(toDatePicker, Messages.get("tooltip.history.toDate"));
+        TooltipSupport.set(fromTimeField, Messages.get("tooltip.history.fromTime"));
+        TooltipSupport.set(toTimeField, Messages.get("tooltip.history.toTime"));
+        customRangeBox.getChildren().setAll(
+                new Label(Messages.get("history.label.from")), fromDatePicker, fromTimeField,
+                new Label(Messages.get("history.label.to")), toDatePicker, toTimeField);
+        customRangeBox.setSpacing(6);
+        customRangeBox.setAlignment(Pos.CENTER_LEFT);
+        customRangeBox.setVisible(false);
+        customRangeBox.setManaged(false);
 
         bssidFilter.getItems().add(ALL_BSSIDS);
         bssidFilter.setValue(ALL_BSSIDS);
@@ -204,19 +262,25 @@ public final class HistoryView {
         refreshBssidButton.setOnAction(e -> refreshBssidList());
         Button exportButton = new Button(Messages.get("history.button.exportVisibleCsv"));
         exportButton.setOnAction(e -> exportCsv());
+        exportAllButton.setText(Messages.get("history.button.exportAllCsv"));
+        exportAllButton.setOnAction(e -> exportAllCsv());
         TooltipSupport.set(rangeSelector, Messages.get("tooltip.history.range"));
         TooltipSupport.set(bssidFilter, Messages.get("tooltip.history.bssidFilter"));
         TooltipSupport.set(searchButton, Messages.get("tooltip.history.search"));
         TooltipSupport.set(refreshBssidButton, Messages.get("tooltip.history.refreshBssid"));
         TooltipSupport.set(exportButton, Messages.get("tooltip.history.exportCsv"));
+        TooltipSupport.set(exportAllButton, Messages.get("tooltip.history.exportAllCsv"));
         TooltipSupport.set(statusLabel, Messages.get("tooltip.history.status"));
 
         HBox controls = new HBox(8, new Label(Messages.get("history.label.range")), rangeSelector,
                 new Label(Messages.get("history.label.bssid")), bssidFilter,
-                searchButton, refreshBssidButton, exportButton, statusLabel);
+                searchButton, refreshBssidButton, exportButton, exportAllButton, statusLabel);
         controls.setAlignment(Pos.CENTER_LEFT);
         controls.setPadding(new Insets(8));
-        root.setTop(controls);
+
+        VBox topBox = new VBox(4, controls, customRangeBox);
+        customRangeBox.setPadding(new Insets(0, 8, 8, 8));
+        root.setTop(topBox);
     }
 
     private void buildChart() {
@@ -355,13 +419,55 @@ public final class HistoryView {
         table.setPlaceholder(new Label(Messages.get("history.placeholder.searchPrompt")));
     }
 
+    /** One inclusive [fromEpochMilli, toEpochMilli) span, used by both the preset and custom-range paths. */
+    private record TimeRange(long fromEpochMilli, long toEpochMilli) {
+    }
+
+    /**
+     * Combines {@link #fromDatePicker}/{@link #fromTimeField} and their "to" counterparts into a
+     * millisecond range in the JVM's default zone. Returns empty (rather than throwing) on any
+     * unparseable input - a plain text field for the time-of-day means a user can type garbage,
+     * and the caller surfaces that as a friendly alert instead of a stack trace.
+     */
+    private Optional<TimeRange> parseCustomRange() {
+        LocalDate fromDate = fromDatePicker.getValue();
+        LocalDate toDate = toDatePicker.getValue();
+        if (fromDate == null || toDate == null) {
+            return Optional.empty();
+        }
+        try {
+            LocalTime fromTime = LocalTime.parse(fromTimeField.getText().trim(), TIME_FIELD_FORMATTER);
+            LocalTime toTime = LocalTime.parse(toTimeField.getText().trim(), TIME_FIELD_FORMATTER);
+            long from = fromDate.atTime(fromTime).atZone(ZoneId.systemDefault()).toInstant().toEpochMilli();
+            long to = toDate.atTime(toTime).atZone(ZoneId.systemDefault()).toInstant().toEpochMilli();
+            if (to <= from) {
+                return Optional.empty();
+            }
+            return Optional.of(new TimeRange(from, to));
+        } catch (DateTimeParseException e) {
+            return Optional.empty();
+        }
+    }
+
     private void search() {
         if (database == null) {
             return;
         }
-        long rangeMillis = rangeMillisByLabel.getOrDefault(rangeSelector.getValue(), 15 * 60_000L);
-        long to = System.currentTimeMillis();
-        long from = to - rangeMillis;
+        long from;
+        long to;
+        if (customRangeLabel.equals(rangeSelector.getValue())) {
+            Optional<TimeRange> range = parseCustomRange();
+            if (range.isEmpty()) {
+                showAlert(Messages.get("history.alert.invalidCustomRange"));
+                return;
+            }
+            from = range.get().fromEpochMilli();
+            to = range.get().toEpochMilli();
+        } else {
+            long rangeMillis = rangeMillisByLabel.getOrDefault(rangeSelector.getValue(), 15 * 60_000L);
+            to = System.currentTimeMillis();
+            from = to - rangeMillis;
+        }
         chartRangeFromMillis = from;
         chartRangeToMillis = to;
 
@@ -461,6 +567,48 @@ public final class HistoryView {
         } catch (Exception e) {
             showAlert(Messages.get("common.export.failed", e.getMessage()));
         }
+    }
+
+    /**
+     * Exports every row in the current search range/BSSID filter, with no {@link
+     * ScanLogDatabase#MAX_QUERY_ROWS} cap - unlike {@link #exportCsv()}, which only writes out
+     * whatever the (capped) table is currently showing. Runs on {@link #exportExecutor} since a
+     * multi-day range can be large enough that streaming it to disk takes real time.
+     */
+    private void exportAllCsv() {
+        if (database == null) {
+            return;
+        }
+        if (chartRangeFromMillis == 0 && chartRangeToMillis == 0) {
+            showAlert(Messages.get("history.export.noRows"));
+            return;
+        }
+        FileChooser chooser = new FileChooser();
+        chooser.setTitle(Messages.get("history.chooser.exportCsv"));
+        chooser.getExtensionFilters().add(new FileChooser.ExtensionFilter("CSV", "*.csv"));
+        File file = chooser.showSaveDialog((Stage) root.getScene().getWindow());
+        if (file == null) {
+            return;
+        }
+        String bssidFilterValue = bssidFilter.getValue() == null ? "" : bssidFilter.getValue().bssid();
+        long from = chartRangeFromMillis;
+        long to = chartRangeToMillis;
+        exportAllButton.setDisable(true);
+        statusLabel.setText(Messages.get("history.status.exportedAll"));
+        exportExecutor.execute(() -> {
+            try {
+                long rowCount = database.exportSamplesToCsv(from, to, bssidFilterValue, file);
+                Platform.runLater(() -> {
+                    statusLabel.setText(Messages.get("history.status.exportedAllDone", file.getName(), rowCount));
+                    exportAllButton.setDisable(false);
+                });
+            } catch (IOException e) {
+                Platform.runLater(() -> {
+                    showAlert(Messages.get("history.status.exportedAllFailed", e.getMessage()));
+                    exportAllButton.setDisable(false);
+                });
+            }
+        });
     }
 
     private void showAlert(String message) {

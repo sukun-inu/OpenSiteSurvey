@@ -22,6 +22,7 @@ import javafx.scene.canvas.Canvas;
 import javafx.scene.canvas.GraphicsContext;
 import javafx.scene.control.Alert;
 import javafx.scene.control.Button;
+import javafx.scene.control.CheckBox;
 import javafx.scene.control.ComboBox;
 import javafx.scene.control.Label;
 import javafx.scene.control.TextField;
@@ -38,9 +39,13 @@ import javafx.stage.FileChooser;
 import javafx.stage.Stage;
 import javafx.util.StringConverter;
 
+import java.io.ByteArrayInputStream;
 import java.io.File;
+import java.io.IOException;
+import java.nio.file.Files;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -76,7 +81,24 @@ public final class SurveyView {
 
     private Image floorPlanImage;
     private String floorPlanPath;
+    // Raw source bytes of the currently loaded floor plan, embedded into saved projects (see
+    // SurveyProject.floorPlanImageBase64) - null when the source file couldn't be read (project
+    // save then falls back to floorPlanPath-only, same as this app's original behavior).
+    private byte[] floorPlanImageBytes;
     private ScanSnapshot latestSnapshot;
+
+    // Coverage-hole highlighting: a checkbox + dBm threshold field, redrawn as diagonal hatching
+    // over any heatmap-grid cell whose interpolated RSSI falls below the threshold.
+    private final CheckBox coverageHoleToggle = new CheckBox(Messages.get("survey.toggle.coverageHoles"));
+    private final TextField coverageThresholdField = new TextField("-75");
+    private final Label coverageSummaryLabel = new Label("");
+
+    // Before/after comparison: a second project's points, loaded independently of the current
+    // floor plan/points, used only as a baseline for a delta heatmap (see HeatmapRenderer.renderDelta).
+    private List<SurveyPoint> comparisonPoints;
+    private String comparisonProjectName;
+    private final ToggleButton comparisonModeToggle = new ToggleButton(Messages.get("survey.toggle.comparisonMode"));
+    private final Label comparisonSummaryLabel = new Label("");
 
     private final Supplier<String> interfaceDescriptionSupplier;
 
@@ -159,12 +181,42 @@ public final class SurveyView {
         reportPdfButton.setOnAction(e -> exportReport(false));
         TooltipSupport.set(reportPdfButton, Messages.get("tooltip.survey.reportPdf"));
 
-        HBox toolbar = new HBox(8, loadFloorPlanButton, new Label(Messages.get("survey.label.targetAp")), targetSelector,
+        coverageHoleToggle.setOnAction(e -> redraw());
+        TooltipSupport.set(coverageHoleToggle, Messages.get("tooltip.survey.coverageHoleToggle"));
+        coverageThresholdField.setPrefWidth(50);
+        coverageThresholdField.setOnAction(e -> redraw());
+        coverageThresholdField.focusedProperty().addListener((obs, was, is) -> {
+            if (!is) {
+                redraw();
+            }
+        });
+        TooltipSupport.set(coverageThresholdField, Messages.get("tooltip.survey.coverageThreshold"));
+
+        Button loadComparisonButton = new Button(Messages.get("survey.button.loadComparison"));
+        loadComparisonButton.setOnAction(e -> onLoadComparison());
+        TooltipSupport.set(loadComparisonButton, Messages.get("tooltip.survey.loadComparison"));
+        comparisonModeToggle.setOnAction(e -> {
+            if (comparisonModeToggle.isSelected() && comparisonPoints == null) {
+                comparisonModeToggle.setSelected(false);
+                showAlert(Messages.get("survey.comparison.noBaseline"));
+                return;
+            }
+            redraw();
+        });
+        TooltipSupport.set(comparisonModeToggle, Messages.get("tooltip.survey.comparisonToggle"));
+
+        HBox toolbarRow1 = new HBox(8, loadFloorPlanButton, new Label(Messages.get("survey.label.targetAp")), targetSelector,
                 surveyModeToggle, new Label(Messages.get("survey.label.ping")), pingHostField,
                 clearButton, saveButton, loadButton, exportCsvButton, exportJsonButton,
                 reportHtmlButton, reportPdfButton);
+        toolbarRow1.setAlignment(Pos.CENTER_LEFT);
+
+        HBox toolbarRow2 = new HBox(8, coverageHoleToggle, new Label(Messages.get("survey.label.coverageThreshold")),
+                coverageThresholdField, loadComparisonButton, comparisonModeToggle);
+        toolbarRow2.setAlignment(Pos.CENTER_LEFT);
+
+        VBox toolbar = new VBox(4, toolbarRow1, toolbarRow2);
         toolbar.setPadding(new Insets(8));
-        toolbar.setAlignment(Pos.CENTER_LEFT);
         root.setTop(toolbar);
     }
 
@@ -225,7 +277,31 @@ public final class SurveyView {
             row.setAlignment(Pos.CENTER_LEFT);
             legend.getChildren().add(row);
         }
+        coverageSummaryLabel.setWrapText(true);
+        coverageSummaryLabel.setMaxWidth(180);
+        comparisonSummaryLabel.setWrapText(true);
+        comparisonSummaryLabel.setMaxWidth(180);
+        legend.getChildren().addAll(coverageSummaryLabel, comparisonSummaryLabel);
         return legend;
+    }
+
+    private void onLoadComparison() {
+        FileChooser chooser = new FileChooser();
+        chooser.setTitle(Messages.get("survey.chooser.loadComparison"));
+        chooser.getExtensionFilters().add(new FileChooser.ExtensionFilter("WAJ Survey Project", "*.json"));
+        File file = chooser.showOpenDialog(currentStage());
+        if (file == null) {
+            return;
+        }
+        try {
+            SurveyProject project = SurveyProjectStore.load(file);
+            comparisonPoints = project.points;
+            comparisonProjectName = file.getName();
+            statusLabel.setText(Messages.get("survey.comparison.loaded", comparisonProjectName, comparisonPoints.size()));
+            redraw();
+        } catch (Exception e) {
+            showAlert(Messages.get("survey.alert.loadFailed", e.getMessage()));
+        }
     }
 
     /** Must be called on the JavaFX Application thread. */
@@ -284,6 +360,19 @@ public final class SurveyView {
         Image image = new Image(file.toURI().toString());
         this.floorPlanImage = image;
         this.floorPlanPath = file.getAbsolutePath();
+        try {
+            this.floorPlanImageBytes = Files.readAllBytes(file.toPath());
+        } catch (IOException e) {
+            this.floorPlanImageBytes = null;
+        }
+        resizeCanvasToFit();
+    }
+
+    /** Restores a floor plan embedded in a loaded project (see {@link #onLoadProject()}). */
+    private void loadFloorPlanFromBytes(byte[] bytes, String originalPath) {
+        this.floorPlanImage = new Image(new ByteArrayInputStream(bytes));
+        this.floorPlanImageBytes = bytes;
+        this.floorPlanPath = originalPath;
         resizeCanvasToFit();
     }
 
@@ -335,7 +424,11 @@ public final class SurveyView {
             return;
         }
         try {
-            SurveyProjectStore.save(new SurveyProject(floorPlanPath, 0.0, points), file);
+            SurveyProject project = new SurveyProject(floorPlanPath, 0.0, points);
+            if (floorPlanImageBytes != null) {
+                project.floorPlanImageBase64 = Base64.getEncoder().encodeToString(floorPlanImageBytes);
+            }
+            SurveyProjectStore.save(project, file);
             statusLabel.setText(Messages.get("survey.status.saved", file.getName()));
         } catch (Exception e) {
             showAlert(Messages.get("survey.alert.saveFailed", e.getMessage()));
@@ -355,7 +448,11 @@ public final class SurveyView {
         }
         try {
             SurveyProject project = SurveyProjectStore.load(file);
-            if (project.floorPlanPath != null) {
+            if (project.floorPlanImageBase64 != null && !project.floorPlanImageBase64.isEmpty()) {
+                loadFloorPlanFromBytes(Base64.getDecoder().decode(project.floorPlanImageBase64), project.floorPlanPath);
+            } else if (project.floorPlanPath != null) {
+                // Older project file (saved before the floor plan was embedded) - fall back to
+                // resolving the absolute path it was saved with.
                 File floorPlanFile = new File(project.floorPlanPath);
                 if (floorPlanFile.exists()) {
                     loadFloorPlanFile(floorPlanFile);
@@ -433,14 +530,25 @@ public final class SurveyView {
             gc.fillRect(0, 0, canvas.getWidth(), canvas.getHeight());
         }
 
+        String target = targetSelector.getSelectionModel().getSelectedItem();
+        String targetBssid = (target == null || target.isEmpty()) ? null : target;
+        boolean comparing = comparisonModeToggle.isSelected() && comparisonPoints != null;
+
         if (!points.isEmpty()) {
-            String target = targetSelector.getSelectionModel().getSelectedItem();
-            String targetBssid = (target == null || target.isEmpty()) ? null : target;
-            javafx.scene.image.WritableImage heatmap = HeatmapRenderer.render(points, targetBssid);
+            javafx.scene.image.WritableImage heatmap = comparing
+                    ? HeatmapRenderer.renderDelta(points, comparisonPoints, targetBssid)
+                    : HeatmapRenderer.render(points, targetBssid);
             gc.setImageSmoothing(true);
             gc.drawImage(heatmap, 0, 0, HeatmapRenderer.GRID_WIDTH, HeatmapRenderer.GRID_HEIGHT,
                     0, 0, canvas.getWidth(), canvas.getHeight());
         }
+
+        if (coverageHoleToggle.isSelected() && !points.isEmpty()) {
+            drawCoverageHoles(gc, targetBssid);
+        } else {
+            coverageSummaryLabel.setText("");
+        }
+        updateComparisonSummary(targetBssid, comparing);
 
         for (SurveyPoint p : points) {
             double px = p.xNorm * canvas.getWidth();
@@ -455,6 +563,81 @@ public final class SurveyView {
             gc.fillOval(px - 4, py - 4, 8, 8);
             gc.strokeOval(px - 4, py - 4, 8, 8);
         }
+    }
+
+    /**
+     * Overlays a diagonal "X" hatch on every heatmap-grid cell (sampled at a coarser stride than
+     * {@link HeatmapRenderer}'s own pixel grid, so the marks read as a hazard-stripe pattern rather
+     * than a solid block) whose IDW-interpolated RSSI falls below {@link #coverageThresholdField}.
+     * Also updates {@link #coverageSummaryLabel} with the fraction of surveyed area affected. An
+     * unparsable threshold falls back to -75dBm (this app's own default RSSI alert threshold)
+     * rather than silently disabling the feature.
+     */
+    private void drawCoverageHoles(GraphicsContext gc, String targetBssid) {
+        double thresholdDbm;
+        try {
+            thresholdDbm = Double.parseDouble(coverageThresholdField.getText().trim());
+        } catch (NumberFormatException e) {
+            thresholdDbm = -75.0;
+        }
+        int stride = 6; // heatmap-grid cells per hatch mark
+        double cellW = canvas.getWidth() / HeatmapRenderer.GRID_WIDTH * stride;
+        double cellH = canvas.getHeight() / HeatmapRenderer.GRID_HEIGHT * stride;
+        gc.setStroke(Color.web("#ffffff"));
+        gc.setLineWidth(1.3);
+        int coveredCells = 0;
+        int holeCells = 0;
+        for (int gy = 0; gy < HeatmapRenderer.GRID_HEIGHT; gy += stride) {
+            double ny = (gy + stride / 2.0) / HeatmapRenderer.GRID_HEIGHT;
+            for (int gx = 0; gx < HeatmapRenderer.GRID_WIDTH; gx += stride) {
+                double nx = (gx + stride / 2.0) / HeatmapRenderer.GRID_WIDTH;
+                Double value = IdwInterpolator.interpolate(nx, ny, points, targetBssid);
+                if (value == null) {
+                    continue;
+                }
+                coveredCells++;
+                if (value < thresholdDbm) {
+                    holeCells++;
+                    double px = gx * (canvas.getWidth() / HeatmapRenderer.GRID_WIDTH);
+                    double py = gy * (canvas.getHeight() / HeatmapRenderer.GRID_HEIGHT);
+                    gc.strokeLine(px, py, px + cellW, py + cellH);
+                    gc.strokeLine(px + cellW, py, px, py + cellH);
+                }
+            }
+        }
+        double coveragePercent = coveredCells == 0 ? 0 : 100.0 * (coveredCells - holeCells) / coveredCells;
+        double holePercent = coveredCells == 0 ? 0 : 100.0 * holeCells / coveredCells;
+        coverageSummaryLabel.setText(Messages.get("survey.coverage.summary", coveragePercent, holePercent));
+    }
+
+    /** Updates {@link #comparisonSummaryLabel} with avg/best/worst RSSI delta at each current point vs. the loaded baseline. */
+    private void updateComparisonSummary(String targetBssid, boolean comparing) {
+        if (!comparing) {
+            comparisonSummaryLabel.setText("");
+            return;
+        }
+        double sum = 0;
+        int n = 0;
+        double best = Double.NEGATIVE_INFINITY;
+        double worst = Double.POSITIVE_INFINITY;
+        for (SurveyPoint p : points) {
+            Integer current = p.rssiFor(targetBssid);
+            Double baseline = IdwInterpolator.interpolate(p.xNorm, p.yNorm, comparisonPoints, targetBssid);
+            if (current == null || baseline == null) {
+                continue;
+            }
+            double delta = current - baseline;
+            sum += delta;
+            n++;
+            best = Math.max(best, delta);
+            worst = Math.min(worst, delta);
+        }
+        if (n == 0) {
+            comparisonSummaryLabel.setText(Messages.get("survey.comparison.noOverlap"));
+            return;
+        }
+        comparisonSummaryLabel.setText(Messages.get("survey.comparison.legend") + "\n"
+                + Messages.get("survey.comparison.summary", sum / n, best, worst, comparisonProjectName));
     }
 
     private void showAlert(String message) {
