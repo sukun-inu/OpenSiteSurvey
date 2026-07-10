@@ -141,3 +141,9 @@ com.opensitesurvey.tool
 - Site Surveyプロジェクトはフロアプラン画像そのものを埋め込んで保存しますが、旧バージョンで保存したプロジェクトファイル(画像パスのみ保持)は、そのパスに画像が存在しないと読み込めません。
 - Channel PlanningのHT/VHTチャネル幅検出は2.4GHz/5GHzのみです。6GHz(HE Operation要素)は未対応で、常に20MHz固定として扱われます。
 - `jpackage` によるexe化(`.\build-release.ps1`)、および `-Msi` オプションによる `.msi` インストーラ生成に対応しています。
+
+## ライセンス
+
+MIT License。Copyright (c) 2026 Hibiki Suzuki。詳細は [LICENSE](LICENSE) を参照してください。
+
+同梱している依存ライブラリ(OpenJFX / JNA / Jackson / SQLite JDBC / OpenPDF)のライセンス表記は、アプリ内の Help > About Third-Party Licenses から確認できます。

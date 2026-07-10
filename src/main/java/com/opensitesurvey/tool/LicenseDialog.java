@@ -54,10 +54,15 @@ public final class LicenseDialog {
         VBox content = new VBox(14);
         content.setPadding(new Insets(16));
 
+        Label projectName = new Label("OpenSiteSurvey");
+        projectName.setStyle("-fx-font-weight: bold;");
+        Label projectLicense = new Label(Messages.get("license.project.body"));
+        projectLicense.setWrapText(true);
+
         Label intro = new Label(Messages.get("license.intro"));
         intro.setWrapText(true);
 
-        content.getChildren().add(intro);
+        content.getChildren().addAll(projectName, projectLicense, new Separator(), intro);
 
         for (Entry entry : ENTRIES) {
             content.getChildren().add(new Separator());
