@@ -6,6 +6,7 @@ import com.opensitesurvey.tool.security.SecurityClassifier;
 import com.opensitesurvey.tool.security.SecurityType;
 import com.opensitesurvey.tool.util.ChannelUtil;
 import com.opensitesurvey.tool.util.PhyTypeUtil;
+import com.opensitesurvey.tool.wifi7.Wifi7Parser;
 import com.opensitesurvey.tool.wlan.WlanBssEntry;
 
 import java.time.Instant;
@@ -25,19 +26,21 @@ public record ApSnapshot(
         Integer channelUtilizationPercent,
         Instant timestamp,
         int channelWidthMhz,
-        int effectiveCenterChannel
+        int effectiveCenterChannel,
+        boolean ehtCapable,
+        boolean mloCapable
 ) {
 
     /**
      * Legacy constructor for callers (mostly tests) built before channel-width detection existed -
-     * defaults to a plain 20MHz channel centered on {@code channel}, i.e. the same behavior this
-     * app always had.
+     * defaults to a plain 20MHz channel centered on {@code channel} and no EHT/MLO capability, i.e.
+     * the same behavior this app always had.
      */
     public ApSnapshot(String ssid, String bssid, int channel, int frequencyKhz, String band, int rssiDbm,
                        int linkQuality, String phyType, boolean privacyEnabled, SecurityType securityType,
                        Integer channelUtilizationPercent, Instant timestamp) {
         this(ssid, bssid, channel, frequencyKhz, band, rssiDbm, linkQuality, phyType, privacyEnabled,
-                securityType, channelUtilizationPercent, timestamp, 20, channel);
+                securityType, channelUtilizationPercent, timestamp, 20, channel, false, false);
     }
 
     /**
@@ -51,6 +54,7 @@ public record ApSnapshot(
         int channel = ChannelUtil.frequencyKhzToChannel(entry.ulChCenterFrequency);
         String band = ChannelUtil.band(entry.ulChCenterFrequency);
         ChannelWidthParser.WidthInfo width = ChannelWidthParser.parse(ie, channel, band);
+        Wifi7Parser.Wifi7Info wifi7 = Wifi7Parser.parse(ie);
         return new ApSnapshot(
                 entry.dot11Ssid.asString(),
                 entry.bssidString(),
@@ -65,7 +69,9 @@ public record ApSnapshot(
                 bssLoad == null ? null : bssLoad.channelUtilizationPercent(),
                 timestamp,
                 width.widthMhz(),
-                width.effectiveCenterChannel()
+                width.effectiveCenterChannel(),
+                wifi7.ehtCapable(),
+                wifi7.mloCapable()
         );
     }
 }

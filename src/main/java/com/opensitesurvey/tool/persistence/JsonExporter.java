@@ -39,6 +39,8 @@ public final class JsonExporter {
             row.put("phyType", ap.phyType());
             row.put("securityType", ap.securityType().name());
             row.put("privacyEnabled", ap.privacyEnabled());
+            row.put("ehtCapable", ap.ehtCapable());
+            row.put("mloCapable", ap.mloCapable());
             rows.add(row);
         }
         MAPPER.writeValue(file, rows);

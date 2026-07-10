@@ -20,7 +20,7 @@ public final class CsvExporter {
 
     public static void exportApSnapshots(List<ApSnapshot> aps, File file) throws IOException {
         StringBuilder sb = new StringBuilder();
-        sb.append("timestamp,ssid,bssid,channel,band,rssi_dbm,link_quality,phy_type,security,privacy\n");
+        sb.append("timestamp,ssid,bssid,channel,band,rssi_dbm,link_quality,phy_type,security,privacy,eht_capable,mlo_capable\n");
         for (ApSnapshot ap : aps) {
             sb.append(CsvUtil.escapeField(ap.timestamp().toString())).append(',')
                     .append(CsvUtil.escapeField(ap.ssid())).append(',')
@@ -31,7 +31,9 @@ public final class CsvExporter {
                     .append(ap.linkQuality()).append(',')
                     .append(CsvUtil.escapeField(ap.phyType())).append(',')
                     .append(CsvUtil.escapeField(ap.securityType().label())).append(',')
-                    .append(ap.privacyEnabled()).append('\n');
+                    .append(ap.privacyEnabled()).append(',')
+                    .append(ap.ehtCapable()).append(',')
+                    .append(ap.mloCapable()).append('\n');
         }
         Files.writeString(file.toPath(), sb.toString(), StandardCharsets.UTF_8);
     }

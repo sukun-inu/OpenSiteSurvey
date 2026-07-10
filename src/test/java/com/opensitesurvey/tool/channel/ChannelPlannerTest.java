@@ -20,7 +20,7 @@ class ChannelPlannerTest {
 
     private static ApSnapshot wideAp(int channel, String band, int rssi, int widthMhz, int effectiveCenterChannel) {
         return new ApSnapshot("test", "AA:BB:CC:DD:EE:FF", channel, 0, band, rssi, 90, "n/a",
-                true, SecurityType.WPA2, null, Instant.now(), widthMhz, effectiveCenterChannel);
+                true, SecurityType.WPA2, null, Instant.now(), widthMhz, effectiveCenterChannel, false, false);
     }
 
     @Test

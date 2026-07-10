@@ -273,12 +273,33 @@ public final class DashboardView {
         phyCol.setCellValueFactory(d -> new ReadOnlyObjectWrapper<>(d.getValue().phyType()));
         phyCol.setPrefWidth(150);
 
+        // EHT Capabilities/Operation and Multi-Link element presence, detected directly from the
+        // beacon/probe response's own IEs (Wifi7Parser) rather than from the driver's reported PHY
+        // type - useful since a driver can lag behind an AP that already advertises 802.11be/MLO
+        // (see phyCol above, which only ever reflects what the driver itself reports).
+        TableColumn<ApSnapshot, String> wifi7Col = new TableColumn<>(Messages.get("dashboard.column.wifi7"));
+        wifi7Col.setCellValueFactory(d -> {
+            ApSnapshot ap = d.getValue();
+            String text;
+            if (ap.ehtCapable() && ap.mloCapable()) {
+                text = "EHT+MLO";
+            } else if (ap.ehtCapable()) {
+                text = "EHT";
+            } else if (ap.mloCapable()) {
+                text = "MLO";
+            } else {
+                text = "";
+            }
+            return new ReadOnlyObjectWrapper<>(text);
+        });
+        wifi7Col.setPrefWidth(80);
+
         TableColumn<ApSnapshot, String> securityCol = new TableColumn<>("Security");
         securityCol.setCellValueFactory(d -> new ReadOnlyObjectWrapper<>(d.getValue().securityType().label()));
         securityCol.setPrefWidth(110);
 
         apTable.getColumns().setAll(List.of(colorCol, visibleCol, ssidCol, bssidCol, vendorCol, channelCol, bandCol,
-                rssiCol, qualityCol, utilizationCol, phyCol, securityCol));
+                rssiCol, qualityCol, utilizationCol, phyCol, wifi7Col, securityCol));
         apTable.setEditable(true);
         apTable.setItems(apItems);
         apTable.setPlaceholder(new Label(Messages.get("common.status.waitingForScan")));

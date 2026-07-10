@@ -10,7 +10,8 @@ UIは日本語/英語(設定画面から切り替え、再起動後に反映)に
 
 ## できること
 
-- **Dashboard**: 周辺AP一覧(表示ON/OFF・信頼済み登録/解除・MACベンダー表示)、5分間RSSI推移(全AP重ね描画)、疑似スペクトラム(帯域切替: 2.4/5/6GHz)、ウォーターフォール、推定ノイズフロアとSNR目盛り表示。疑似スペクトラムはチェックボックスでChannel Planningの混雑度スコア(帯域内の全候補チャネル分、推奨チャネルは緑でハイライト)を重ねて表示可能です。AP一覧はCSV/JSON出力可能。
+- **Dashboard**: 周辺AP一覧(表示ON/OFF・信頼済み登録/解除・MACベンダー表示・Wi-Fi7/MLO対応表示)、5分間RSSI推移(全AP重ね描画)、疑似スペクトラム(帯域切替: 2.4/5/6GHz)、ウォーターフォール、推定ノイズフロアとSNR目盛り表示。疑似スペクトラムはチェックボックスでChannel Planningの混雑度スコア(帯域内の全候補チャネル分、推奨チャネルは緑でハイライト)を重ねて表示可能です。AP一覧はCSV/JSON出力可能。
+- **Wi-Fi 7 (802.11be) / MLO検出**: ビーコン/プローブ応答の生IEからEHT Capabilities/EHT Operation要素とMulti-Link要素の有無を直接判定するため、ドライバのPHY種別表示がまだ802.11be対応を報告していないAPでも検出できる場合があります。Dashboard一覧の「Wi-Fi7/MLO」列、およびCSV/JSON出力の`eht_capable`/`mlo_capable`(`ehtCapable`/`mloCapable`)フィールドで確認できます。
 - **グラフのカーソル固定/スクロール**: Dashboard(RSSI推移・疑似スペクトラム)、History、Channel Planningの各グラフはクリックでカーソル位置(またはChannel Planningの場合は山の内訳)を固定できます。固定中はマウスをどこに動かしても表示が変わらないため、サイドパネルへマウスを移動してスクロールしながら値を確認できます。もう一度クリックすると解除され、通常のホバー追従に戻ります。値一覧パネルは長い項目でも省略記号で消えず、必要に応じて横スクロールで全文を確認できます。
 - **Site Survey**: フロアプラン画像を読み込み、計測モードでクリックした地点のWi-Fiスナップショット(+任意でPing応答時間)を記録。IDW補間ヒートマップを描画し、対象APは「最強AP自動選択」またはBSSID固定で切替可能。フロアプラン画像はプロジェクトファイルに埋め込まれるため、画像を移動/リネームしてもプロジェクトの再読込だけで復元できます。RSSIしきい値を下回るエリアを斜線でハイライトする「カバレッジホール表示」、別プロジェクトを比較対象として読み込みBefore/Afterの差分ヒートマップ(改善=緑/悪化=赤)を表示する「比較モード」に対応。プロジェクト保存/読込、地点CSV/JSON出力、HTML/PDFレポート生成にも対応。
 - **Security Audit**: 802.11 情報要素(RSN/WPA IE)を解析し、Open/WEP/WPA/WPA2/WPA2-WPA3(混在)/WPA3を判定。開放/弱暗号APを色分け表示し、検出件数サマリを提示。MACアドレスのOUIからベンダー名を表示するため、既知SSIDのAPが予期しないベンダーに変わった場合の見分けにも使えます。
@@ -107,6 +108,7 @@ java -jar target\open-site-survey-<version>-shaded.jar --headless --interval 500
 
 - WLAN/セキュリティ: `Dot11SsidTest`, `SecurityClassifierTest`
 - チャネル設計: `ChannelPlannerTest`, `BssLoadParserTest`, `ChannelUtilTest`, `ChannelWidthParserTest`
+- Wi-Fi7/MLO検出: `Wifi7ParserTest`
 - アラート: `AlertEngineTest`
 - Ping/Traceroute: `PingProbeTest`, `TracerouteProbeTest`, `HopRttHistoryTest`
 - Site Survey/レポート: `IdwInterpolatorTest`, `SurveyProjectStoreTest`, `PdfReportGeneratorTest`
@@ -126,6 +128,7 @@ com.opensitesurvey.tool
 ├── util/                    チャネル変換・色スケール・ノイズ推定・MACベンダー(OUI)検索
 ├── security/                IE解析によるセキュリティ種別判定 + Security Audit UI
 ├── channel/                 チャネル混雑度スコア・チャネル幅(HT/VHT IE)検出 + Channel Planning UI
+├── wifi7/                   EHT Capabilities/Operation・Multi-Link要素(Wi-Fi7/MLO)の検出
 ├── alert/                   アラートルール・エンジン・信頼済みAP管理・設定ダイアログ・Windows通知
 ├── ping/                    ping/tracert 実行・パース
 ├── report/                  HTML/PDFサイトサーベイレポート生成
