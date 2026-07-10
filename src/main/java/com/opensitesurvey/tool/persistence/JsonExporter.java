@@ -26,6 +26,15 @@ public final class JsonExporter {
     }
 
     public static void exportApSnapshots(List<ApSnapshot> aps, File file) throws IOException {
+        MAPPER.writeValue(file, apSnapshotRows(aps));
+    }
+
+    public static void exportSurveyPoints(List<SurveyPoint> points, File file) throws IOException {
+        MAPPER.writeValue(file, surveyPointRows(points));
+    }
+
+    /** Same row shape as {@link #exportApSnapshots}, exposed for callers (e.g. the REST API) that need the JSON bytes rather than a file. */
+    public static List<Map<String, Object>> apSnapshotRows(List<ApSnapshot> aps) {
         List<Map<String, Object>> rows = new ArrayList<>();
         for (ApSnapshot ap : aps) {
             Map<String, Object> row = new LinkedHashMap<>();
@@ -43,10 +52,11 @@ public final class JsonExporter {
             row.put("mloCapable", ap.mloCapable());
             rows.add(row);
         }
-        MAPPER.writeValue(file, rows);
+        return rows;
     }
 
-    public static void exportSurveyPoints(List<SurveyPoint> points, File file) throws IOException {
+    /** Same row shape as {@link #exportSurveyPoints}, exposed for callers (e.g. the REST API) that need the JSON bytes rather than a file. */
+    public static List<Map<String, Object>> surveyPointRows(List<SurveyPoint> points) {
         List<Map<String, Object>> rows = new ArrayList<>();
         for (SurveyPoint p : points) {
             Map<String, Object> row = new LinkedHashMap<>();
@@ -58,6 +68,10 @@ public final class JsonExporter {
             row.put("pingRttMs", p.pingRttMs);
             rows.add(row);
         }
-        MAPPER.writeValue(file, rows);
+        return rows;
+    }
+
+    public static byte[] toJsonBytes(Object value) throws IOException {
+        return MAPPER.writeValueAsBytes(value);
     }
 }

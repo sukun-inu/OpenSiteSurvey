@@ -5,6 +5,8 @@ import com.opensitesurvey.tool.alert.AlertEngine;
 import com.opensitesurvey.tool.alert.AlertsView;
 import com.opensitesurvey.tool.alert.NotificationService;
 import com.opensitesurvey.tool.alert.SettingsDialog;
+import com.opensitesurvey.tool.api.ApiServer;
+import com.opensitesurvey.tool.model.ScanSnapshot;
 import com.opensitesurvey.tool.persistence.AppConfig;
 import com.opensitesurvey.tool.persistence.AppConfigStore;
 import com.opensitesurvey.tool.persistence.AppPaths;
@@ -60,6 +62,9 @@ public class App extends Application {
     private WlanPoller poller;
     private ScanLogDatabase scanLogDatabase;
     private AppConfig appConfig;
+    private ApiServer apiServer;
+    private final java.util.concurrent.atomic.AtomicReference<ScanSnapshot> latestSnapshotRef =
+            new java.util.concurrent.atomic.AtomicReference<>();
 
     @Override
     public void start(Stage primaryStage) {
@@ -189,6 +194,11 @@ public class App extends Application {
         poller = new WlanPoller(
                 DEFAULT_POLL_INTERVAL_MILLIS,
                 snapshot -> {
+                    // ScanSnapshot/ApSnapshot are immutable records, so publishing the latest one
+                    // here (the poller's own background thread) is safe for the REST API's HTTP
+                    // handler threads to read via latestSnapshotRef.get() without any further
+                    // synchronization or waiting on the JavaFX Application thread.
+                    latestSnapshotRef.set(snapshot);
                     // Runs on the poller's background thread - do the (possibly blocking) DB
                     // write here rather than inside Platform.runLater, so disk I/O never stalls
                     // the JavaFX Application thread. Throttled independent of the UI poll
@@ -269,9 +279,24 @@ public class App extends Application {
 
         poller.start();
 
+        if (appConfig.restApiEnabled) {
+            try {
+                apiServer = ApiServer.start(appConfig.restApiPort, latestSnapshotRef::get,
+                        survey::snapshotPoints, survey::snapshotApPositionEstimates);
+            } catch (Exception e) {
+                // Most likely cause: the configured port is already in use by another process -
+                // not worth blocking the whole app over, so degrade to "API not running" instead.
+                dashboard.getInterfaceLabel().setText(
+                        Messages.get("common.error.prefix", "REST API: " + e.getMessage()));
+            }
+        }
+
         primaryStage.setOnCloseRequest(e -> {
             poller.stop();
             tracerouteView.shutdown();
+            if (apiServer != null) {
+                apiServer.stop();
+            }
         });
     }
 
@@ -324,6 +349,9 @@ public class App extends Application {
     public void stop() {
         if (poller != null) {
             poller.stop();
+        }
+        if (apiServer != null) {
+            apiServer.stop();
         }
         if (scanLogDatabase != null) {
             scanLogDatabase.close();

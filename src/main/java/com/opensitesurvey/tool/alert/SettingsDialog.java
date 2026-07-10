@@ -68,6 +68,14 @@ public final class SettingsDialog {
         pingHostField.setPromptText(Messages.get("settings.pingHost.prompt"));
         TooltipSupport.set(pingHostField, Messages.get("tooltip.settings.pingHost"));
 
+        CheckBox restApiEnabledCheck = new CheckBox(Messages.get("settings.check.restApiEnabled"));
+        restApiEnabledCheck.setSelected(config.restApiEnabled);
+        TooltipSupport.set(restApiEnabledCheck, Messages.get("tooltip.settings.restApiEnabled"));
+        Spinner<Integer> restApiPortSpinner = new Spinner<>(1024, 65535, config.restApiPort);
+        restApiPortSpinner.setEditable(true);
+        commitOnFocusLoss(restApiPortSpinner);
+        TooltipSupport.set(restApiPortSpinner, Messages.get("tooltip.settings.restApiPort"));
+
         // Language names are shown in their own native form regardless of the currently active UI
         // language (the same convention every OS/app language picker uses) - a user who can't read
         // the current language still needs to find their own in the list, so these two literals are
@@ -75,6 +83,8 @@ public final class SettingsDialog {
         ComboBox<String> languageSelector = new ComboBox<>();
         languageSelector.getItems().setAll("日本語", "English");
         String originalLanguage = config.language;
+        boolean originalRestApiEnabled = config.restApiEnabled;
+        int originalRestApiPort = config.restApiPort;
         languageSelector.getSelectionModel().select("en".equals(config.language) ? "English" : "日本語");
         TooltipSupport.set(languageSelector, Messages.get("tooltip.settings.language"));
 
@@ -104,6 +114,8 @@ public final class SettingsDialog {
         form.addRow(row++, notifyCheck);
         form.addRow(row++, new Label(Messages.get("settings.label.pingHost")), pingHostField);
         form.addRow(row++, new Label(Messages.get("settings.label.language")), languageSelector);
+        form.addRow(row++, restApiEnabledCheck);
+        form.addRow(row++, new Label(Messages.get("settings.label.restApiPort")), restApiPortSpinner);
 
         VBox trustedBox = new VBox(6, new Label(Messages.get("settings.label.trustedList")), trustedList, untrustButton);
 
@@ -122,13 +134,15 @@ public final class SettingsDialog {
             config.windowsNotificationsEnabled = notifyCheck.isSelected();
             config.defaultPingHost = pingHostField.getText();
             config.language = "English".equals(languageSelector.getValue()) ? "en" : "ja";
+            config.restApiEnabled = restApiEnabledCheck.isSelected();
+            config.restApiPort = restApiPortSpinner.getValue();
             AppConfigStore.save(config);
             onSaved.run();
             if (!config.language.equals(originalLanguage)) {
-                Alert restartNotice = new Alert(Alert.AlertType.INFORMATION, Messages.get("settings.language.restartNotice"));
-                restartNotice.setHeaderText(null);
-                AppTheme.apply(restartNotice);
-                restartNotice.showAndWait();
+                showRestartNotice(Messages.get("settings.language.restartNotice"));
+            }
+            if (config.restApiEnabled != originalRestApiEnabled || config.restApiPort != originalRestApiPort) {
+                showRestartNotice(Messages.get("settings.restApi.restartNotice"));
             }
             stage.close();
         });
@@ -185,6 +199,13 @@ public final class SettingsDialog {
             return (T) Double.valueOf(Math.max(dblFactory.getMin(), Math.min(dblFactory.getMax(), dblValue)));
         }
         return value;
+    }
+
+    private static void showRestartNotice(String message) {
+        Alert restartNotice = new Alert(Alert.AlertType.INFORMATION, message);
+        restartNotice.setHeaderText(null);
+        AppTheme.apply(restartNotice);
+        restartNotice.showAndWait();
     }
 
     private static void refreshTrustedList(ListView<String> listView, TrustedApRegistry registry) {

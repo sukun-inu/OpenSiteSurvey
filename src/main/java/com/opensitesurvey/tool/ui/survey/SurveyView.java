@@ -14,6 +14,7 @@ import com.opensitesurvey.tool.report.HtmlReportGenerator;
 import com.opensitesurvey.tool.report.PdfReportGenerator;
 import com.opensitesurvey.tool.report.ReportData;
 import com.opensitesurvey.tool.util.AppTheme;
+import com.opensitesurvey.tool.util.FxSync;
 import com.opensitesurvey.tool.util.SignalColorScale;
 import com.opensitesurvey.tool.util.TooltipSupport;
 import javafx.application.Platform;
@@ -112,6 +113,13 @@ public final class SurveyView {
     // seen so far, not just the current heatmap target, since this is meant as an overview of
     // where every detected AP likely sits rather than a per-target detail view.
     private final CheckBox estimatedApPositionsToggle = new CheckBox(Messages.get("survey.toggle.estimatedApPositions"));
+
+    // Coverage-gap AP placement suggestions (see ApPlacementAdvisor) - computed on demand (button
+    // click) rather than on every redraw() like the toggles above, since it's a deliberate
+    // one-shot "search for candidate positions" action rather than a cheap continuous overlay.
+    // Cleared whenever points/floor plan/project change so a stale suggestion never lingers over
+    // unrelated data (same rationale as clearComparisonState()).
+    private List<ApPlacementAdvisor.Suggestion> apPlacementSuggestions = List.of();
 
     // Before/after comparison: a second project's points, loaded independently of the current
     // floor plan/points, used only as a baseline for a delta heatmap (see HeatmapRenderer.renderDelta).
@@ -233,6 +241,10 @@ public final class SurveyView {
         estimatedApPositionsToggle.setOnAction(e -> redraw());
         TooltipSupport.set(estimatedApPositionsToggle, Messages.get("tooltip.survey.estimatedApPositions"));
 
+        Button suggestApPlacementButton = new Button(Messages.get("survey.button.suggestApPlacement"));
+        suggestApPlacementButton.setOnAction(e -> onSuggestApPlacement());
+        TooltipSupport.set(suggestApPlacementButton, Messages.get("tooltip.survey.suggestApPlacement"));
+
         Button loadComparisonButton = new Button(Messages.get("survey.button.loadComparison"));
         loadComparisonButton.setOnAction(e -> onLoadComparison());
         TooltipSupport.set(loadComparisonButton, Messages.get("tooltip.survey.loadComparison"));
@@ -266,7 +278,8 @@ public final class SurveyView {
         toolbarRow1.setAlignment(Pos.CENTER_LEFT);
 
         HBox toolbarRow2 = new HBox(8, coverageHoleToggle, new Label(Messages.get("survey.label.coverageThreshold")),
-                coverageThresholdField, estimatedApPositionsToggle, loadComparisonButton, comparisonModeToggle);
+                coverageThresholdField, estimatedApPositionsToggle, suggestApPlacementButton,
+                loadComparisonButton, comparisonModeToggle);
         toolbarRow2.setAlignment(Pos.CENTER_LEFT);
 
         VBox toolbar = new VBox(4, toolbarRow1, toolbarRow2);
@@ -389,6 +402,7 @@ public final class SurveyView {
         clearComparisonState();
         loadFloorPlanFile(file);
         points.clear();
+        apPlacementSuggestions = List.of();
         statusLabel.setText(Messages.get("survey.status.floorPlanLoaded", file.getName()));
         redraw();
     }
@@ -480,6 +494,7 @@ public final class SurveyView {
         alert.showAndWait().ifPresent(response -> {
             if (response.getButtonData().isDefaultButton()) {
                 points.clear();
+                apPlacementSuggestions = List.of();
                 statusLabel.setText(Messages.get("survey.status.pointCount", 0));
                 redraw();
             }
@@ -540,6 +555,7 @@ public final class SurveyView {
                     }
                     points.clear();
                     points.addAll(project.points);
+                    apPlacementSuggestions = List.of();
                     statusLabel.setText(Messages.get("survey.status.projectLoaded", file.getName(), points.size()));
                     redraw();
                 });
@@ -627,18 +643,38 @@ public final class SurveyView {
         if (file == null) {
             return;
         }
+        try {
+            GeoPackageExporter.exportSurveyPoints(points, buildApPositionRows(), file);
+            statusLabel.setText(Messages.get("survey.status.pointsExported", file.getName()));
+        } catch (Exception e) {
+            showAlert(Messages.get("common.export.failed", e.getMessage()));
+        }
+    }
+
+    /** Must be called on the JavaFX Application thread - see {@link #snapshotApPositionEstimates()} for the cross-thread equivalent. */
+    private List<GeoPackageExporter.ApPositionRow> buildApPositionRows() {
         List<GeoPackageExporter.ApPositionRow> apPositions = new ArrayList<>();
         for (ApEstimateInfo info : computeApPositionEstimates()) {
             apPositions.add(new GeoPackageExporter.ApPositionRow(
                     info.bssid(), info.ssid(), info.estimate().sampleCount(),
                     info.estimate().xNorm(), info.estimate().yNorm()));
         }
-        try {
-            GeoPackageExporter.exportSurveyPoints(points, apPositions, file);
-            statusLabel.setText(Messages.get("survey.status.pointsExported", file.getName()));
-        } catch (Exception e) {
-            showAlert(Messages.get("common.export.failed", e.getMessage()));
-        }
+        return apPositions;
+    }
+
+    /**
+     * Safe to call from any thread (e.g. an HTTP handler thread in {@link
+     * com.opensitesurvey.tool.api.ApiServer}) - marshals the read onto the JavaFX Application
+     * thread via {@link FxSync} rather than requiring {@link #points} itself to be
+     * synchronized/volatile.
+     */
+    public List<SurveyPoint> snapshotPoints() {
+        return FxSync.callAndWait(() -> List.copyOf(points));
+    }
+
+    /** Cross-thread-safe equivalent of {@link #buildApPositionRows()} - see {@link #snapshotPoints()}. */
+    public List<GeoPackageExporter.ApPositionRow> snapshotApPositionEstimates() {
+        return FxSync.callAndWait(this::buildApPositionRows);
     }
 
     private void exportReport(boolean html) {
@@ -736,6 +772,53 @@ public final class SurveyView {
         if (estimatedApPositionsToggle.isSelected() && !points.isEmpty()) {
             drawEstimatedApPositions(gc);
         }
+
+        if (!apPlacementSuggestions.isEmpty()) {
+            drawApPlacementSuggestions(gc);
+        }
+    }
+
+    /**
+     * Computes up to 3 {@link ApPlacementAdvisor} suggestions for the currently-displayed heatmap
+     * (same points/target/interpolator/threshold the user is already looking at) and stores them
+     * for {@link #redraw()} to overlay - a deliberate one-shot action (unlike the continuously
+     * redrawn toggles above) since the greedy search, while fast, is still meant as an explicit
+     * "search for candidate positions" step rather than free continuous overlay work.
+     */
+    private void onSuggestApPlacement() {
+        if (points.isEmpty()) {
+            showAlert(Messages.get("survey.alert.noPointsForSuggestion"));
+            return;
+        }
+        String target = targetSelector.getSelectionModel().getSelectedItem();
+        String targetBssid = (target == null || target.isEmpty()) ? null : target;
+        Double[][] valueGrid = HeatmapRenderer.computeValueGrid(points, targetBssid, currentInterpolator());
+        apPlacementSuggestions = ApPlacementAdvisor.suggest(valueGrid, parsedCoverageThreshold(), 3);
+        if (apPlacementSuggestions.isEmpty()) {
+            showAlert(Messages.get("survey.placement.noSuggestions"));
+        }
+        redraw();
+    }
+
+    /**
+     * Draws a "+" cross marker (distinct from the round survey-point markers and the diamond
+     * {@link #drawEstimatedApPositions estimated-AP} markers) at each suggested new-AP position,
+     * labeled with how many currently-weak cells it would bring above the coverage threshold.
+     */
+    private void drawApPlacementSuggestions(GraphicsContext gc) {
+        Color markerColor = Color.web("#4cc9f0");
+        for (ApPlacementAdvisor.Suggestion s : apPlacementSuggestions) {
+            double px = s.xNorm() * canvas.getWidth();
+            double py = s.yNorm() * canvas.getHeight();
+            gc.setFill(Color.web("#1e2228"));
+            gc.fillOval(px - 9, py - 9, 18, 18);
+            gc.setStroke(markerColor);
+            gc.setLineWidth(2);
+            gc.strokeLine(px - 7, py, px + 7, py);
+            gc.strokeLine(px, py - 7, px, py + 7);
+            gc.setFill(markerColor);
+            gc.fillText(Messages.get("survey.placement.markerLabel", s.cellsImproved()), px + 10, py + 4);
+        }
     }
 
     /** One BSSID's {@link ApPositionEstimator} estimate, paired with its best-effort SSID label. */
@@ -802,12 +885,7 @@ public final class SurveyView {
      * disabling the feature.
      */
     private void drawCoverageHoles(GraphicsContext gc, Double[][] valueGrid) {
-        double thresholdDbm;
-        try {
-            thresholdDbm = Double.parseDouble(coverageThresholdField.getText().trim());
-        } catch (NumberFormatException e) {
-            thresholdDbm = -75.0;
-        }
+        double thresholdDbm = parsedCoverageThreshold();
         int stride = 6; // heatmap-grid cells per hatch mark
         double cellW = canvas.getWidth() / HeatmapRenderer.GRID_WIDTH * stride;
         double cellH = canvas.getHeight() / HeatmapRenderer.GRID_HEIGHT * stride;
@@ -836,6 +914,15 @@ public final class SurveyView {
         double coveragePercent = coveredCells == 0 ? 0 : 100.0 * (coveredCells - holeCells) / coveredCells;
         double holePercent = coveredCells == 0 ? 0 : 100.0 * holeCells / coveredCells;
         coverageSummaryLabel.setText(Messages.get("survey.coverage.summary", coveragePercent, holePercent));
+    }
+
+    /** Parses {@link #coverageThresholdField}, falling back to -75dBm (this app's default RSSI alert threshold) on unparsable text - shared by {@link #drawCoverageHoles} and {@link #onSuggestApPlacement} so both agree on the same "weak" definition. */
+    private double parsedCoverageThreshold() {
+        try {
+            return Double.parseDouble(coverageThresholdField.getText().trim());
+        } catch (NumberFormatException e) {
+            return -75.0;
+        }
     }
 
     /** Updates {@link #comparisonSummaryLabel} with avg/best/worst RSSI delta at each current point vs. the loaded baseline. */

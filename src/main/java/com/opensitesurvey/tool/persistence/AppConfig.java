@@ -37,6 +37,10 @@ public class AppConfig {
     public volatile boolean channelCongestionAlertEnabled = true;
     public volatile boolean windowsNotificationsEnabled = true;
 
+    /** REST API is bound to loopback (127.0.0.1) only, opt-in, and takes effect on next app launch. */
+    public volatile boolean restApiEnabled = false;
+    public volatile int restApiPort = 8787;
+
     public List<TrustedAp> trustedAps = new ArrayList<>();
 
     public String defaultPingHost = "";
