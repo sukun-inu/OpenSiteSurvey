@@ -666,6 +666,24 @@ public final class DashboardView {
     private record ChannelCongestionEntry(boolean recommended, XYChart.Series<Number, Number> series) {
     }
 
+    /**
+     * Samples a Gaussian bell curve centered at {@code centerMhz} across {@code [startMhz, endMhz]}
+     * into a new series, scaled from {@code baseline} up to {@code peakY} at the center - the one
+     * shape shared by every curve drawn on the spectrum chart (AP RSSI, per-AP channel utilization,
+     * and the Channel Planning congestion overlay), which otherwise differ only in their sigma and
+     * Y range.
+     */
+    private static XYChart.Series<Number, Number> sampleGaussianCurve(double centerMhz, double sigma,
+            double baseline, double peakY, double startMhz, double endMhz, int steps) {
+        XYChart.Series<Number, Number> series = new XYChart.Series<>();
+        for (int i = 0; i <= steps; i++) {
+            double f = startMhz + (endMhz - startMhz) * i / steps;
+            double gaussian = Math.exp(-Math.pow(f - centerMhz, 2) / (2 * sigma * sigma));
+            series.getData().add(new XYChart.Data<>(f, baseline + (peakY - baseline) * gaussian));
+        }
+        return series;
+    }
+
     private void refreshSpectrumChart(ScanSnapshot snapshot) {
         for (Node annotation : spectrumAnnotations) {
             spectrumChart.removeAnnotation(annotation);
@@ -697,7 +715,6 @@ public final class DashboardView {
         // text label - every other candidate's relative height already reads as "how busy", and
         // the exact per-channel score/breakdown remains one click away on the Channel Planning tab.
         List<ChannelCongestionEntry> congestionEntries = new ArrayList<>();
-        Double recommendedCenterMhz = null;
         Integer recommendedChannel = null;
         if (showChannelPlanningCheckBox.isSelected()) {
             ChannelPlanner.Recommendation rec = ChannelPlanner.recommend(snapshot.accessPoints(), band);
@@ -713,17 +730,11 @@ public final class DashboardView {
                     boolean recommended = channel == rec.channel();
                     double peakY = SPECTRUM_Y_NOMINAL_LOWER
                             + (SPECTRUM_Y_NOMINAL_UPPER - SPECTRUM_Y_NOMINAL_LOWER) * (scoreEntry.getValue() / maxScore);
-                    XYChart.Series<Number, Number> congestionSeries = new XYChart.Series<>();
-                    for (int i = 0; i <= steps; i++) {
-                        double f = startMhz + (endMhz - startMhz) * i / steps;
-                        double gaussian = Math.exp(-Math.pow(f - centerMhz, 2) / (2 * congestionSigma * congestionSigma));
-                        double y = SPECTRUM_Y_NOMINAL_LOWER + (peakY - SPECTRUM_Y_NOMINAL_LOWER) * gaussian;
-                        congestionSeries.getData().add(new XYChart.Data<>(f, y));
-                    }
+                    XYChart.Series<Number, Number> congestionSeries = sampleGaussianCurve(centerMhz, congestionSigma,
+                            SPECTRUM_Y_NOMINAL_LOWER, peakY, startMhz, endMhz, steps);
                     spectrumChart.getData().add(congestionSeries);
                     congestionEntries.add(new ChannelCongestionEntry(recommended, congestionSeries));
                     if (recommended) {
-                        recommendedCenterMhz = centerMhz;
                         recommendedChannel = channel;
                     }
                 }
@@ -735,7 +746,6 @@ public final class DashboardView {
             channelPlanningSummaryLabel.setVisible(false);
             channelPlanningSummaryLabel.setManaged(false);
         }
-        Double finalRecommendedCenterMhz = recommendedCenterMhz;
         Integer finalRecommendedChannel = recommendedChannel;
 
         List<SpectrumPeakEntry> peaks = new ArrayList<>();
@@ -745,15 +755,9 @@ public final class DashboardView {
                 continue;
             }
             double centerMhz = ap.frequencyKhz() / 1000.0;
-            XYChart.Series<Number, Number> series = new XYChart.Series<>();
+            XYChart.Series<Number, Number> series = sampleGaussianCurve(centerMhz, sigma,
+                    NoiseEstimator.ESTIMATED_NOISE_FLOOR_DBM, ap.rssiDbm(), startMhz, endMhz, steps);
             series.setName(labelFor(ap.bssid()));
-            for (int i = 0; i <= steps; i++) {
-                double f = startMhz + (endMhz - startMhz) * i / steps;
-                double gaussian = Math.exp(-Math.pow(f - centerMhz, 2) / (2 * sigma * sigma));
-                double y = NoiseEstimator.ESTIMATED_NOISE_FLOOR_DBM
-                        + (ap.rssiDbm() - NoiseEstimator.ESTIMATED_NOISE_FLOOR_DBM) * gaussian;
-                series.getData().add(new XYChart.Data<>(f, y));
-            }
             spectrumChart.getData().add(series);
             peaks.add(new SpectrumPeakEntry(ap.bssid(), centerMhz, ap.rssiDbm(), series));
 
@@ -763,15 +767,10 @@ public final class DashboardView {
             // onto the axis's fixed nominal range (not its live/zoomed bounds, so the meaning of
             // "50% high" doesn't shift as the user zooms the RSSI/SNR scale).
             if (ap.channelUtilizationPercent() != null) {
-                XYChart.Series<Number, Number> utilSeries = new XYChart.Series<>();
                 double peakY = SPECTRUM_Y_NOMINAL_LOWER
                         + (SPECTRUM_Y_NOMINAL_UPPER - SPECTRUM_Y_NOMINAL_LOWER) * (ap.channelUtilizationPercent() / 100.0);
-                for (int i = 0; i <= steps; i++) {
-                    double f = startMhz + (endMhz - startMhz) * i / steps;
-                    double gaussian = Math.exp(-Math.pow(f - centerMhz, 2) / (2 * sigma * sigma));
-                    double y = SPECTRUM_Y_NOMINAL_LOWER + (peakY - SPECTRUM_Y_NOMINAL_LOWER) * gaussian;
-                    utilSeries.getData().add(new XYChart.Data<>(f, y));
-                }
+                XYChart.Series<Number, Number> utilSeries = sampleGaussianCurve(centerMhz, sigma,
+                        SPECTRUM_Y_NOMINAL_LOWER, peakY, startMhz, endMhz, steps);
                 spectrumChart.getData().add(utilSeries);
                 utilizationSeriesList.add(utilSeries);
             }
@@ -827,8 +826,8 @@ public final class DashboardView {
             // whole point of this pass is decluttering; the other candidates' relative curve
             // height already conveys "how busy", and the exact per-channel score is one click away
             // on the Channel Planning tab.
-            if (finalRecommendedCenterMhz != null) {
-                double px = spectrumXAxis.getDisplayPosition(finalRecommendedCenterMhz);
+            if (finalRecommendedChannel != null) {
+                double px = spectrumXAxis.getDisplayPosition(ChannelUtil.channelToFrequencyMhz(band, finalRecommendedChannel));
                 Line marker = new Line(px, 0, px, spectrumPlotHeight);
                 marker.getStyleClass().add("channel-planning-recommended-marker");
                 marker.setMouseTransparent(true);

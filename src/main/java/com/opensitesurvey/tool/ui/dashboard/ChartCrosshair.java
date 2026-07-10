@@ -1,6 +1,7 @@
 package com.opensitesurvey.tool.ui.dashboard;
 
 import com.opensitesurvey.tool.i18n.Messages;
+import com.opensitesurvey.tool.util.HoverPanelSupport;
 import javafx.application.Platform;
 import javafx.scene.Node;
 import javafx.scene.chart.Chart;
@@ -59,7 +60,7 @@ public final class ChartCrosshair {
     private final VBox panel = new VBox(3);
     private final Label headerLabel = new Label();
     private final VBox entriesBox = new VBox(2);
-    private final ScrollPane entriesScroll = new ScrollPane(entriesBox);
+    private final ScrollPane entriesScroll = HoverPanelSupport.scrollableEntries(entriesBox);
     private final Line crosshairLine = new Line();
 
     private final Chart chart;
@@ -107,11 +108,6 @@ public final class ChartCrosshair {
         panel.setMinWidth(210);
         panel.getStyleClass().add("crosshair-panel");
         headerLabel.getStyleClass().add("crosshair-header");
-        entriesScroll.setFitToWidth(false);
-        entriesScroll.setFitToHeight(false);
-        entriesScroll.setHbarPolicy(ScrollPane.ScrollBarPolicy.AS_NEEDED);
-        entriesScroll.setVbarPolicy(ScrollPane.ScrollBarPolicy.AS_NEEDED);
-        entriesScroll.getStyleClass().add("crosshair-scroll");
         VBox.setVgrow(entriesScroll, Priority.ALWAYS);
         panel.getChildren().addAll(headerLabel, entriesScroll);
         showPlaceholder();
@@ -171,8 +167,7 @@ public final class ChartCrosshair {
 
     private void updateCrosshair(double xPixel) {
         double dataX = xAxis.getValueForDisplay(xPixel).doubleValue();
-        String suffix = paused ? " " + Messages.get("common.chart.pausedSuffix") : "";
-        headerLabel.setText(xFormatter.apply(dataX) + suffix);
+        headerLabel.setText(xFormatter.apply(dataX) + HoverPanelSupport.pausedSuffix(paused));
         renderEntries(entriesAt.apply(dataX));
 
         crosshairLine.setStartX(xPixel);

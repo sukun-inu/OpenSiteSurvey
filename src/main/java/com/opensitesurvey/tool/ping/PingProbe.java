@@ -4,6 +4,8 @@ import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.nio.charset.Charset;
 import java.util.Optional;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -27,6 +29,25 @@ public final class PingProbe {
     private static final Charset CONSOLE_CHARSET = Charset.forName("MS932");
     private static final Pattern RTT_PATTERN = Pattern.compile("(?:time|時間)\\s*[=<]\\s*(\\d+)\\s*ms", Pattern.CASE_INSENSITIVE);
 
+    // Shared by every ping() call rather than spawning a dedicated Thread per call - TraceroutePoller
+    // alone calls ping() once per hop, concurrently, on every ~1s cycle, so a per-call thread would
+    // mean a steady stream of short-lived platform threads on top of its own ping-worker pool. A
+    // single scheduled task per call on this one thread does the same job (see ping()'s own comment
+    // on why a watchdog is needed at all).
+    private static final ScheduledThreadPoolExecutor WATCHDOG_EXECUTOR = new ScheduledThreadPoolExecutor(1, r -> {
+        Thread t = new Thread(r, "ping-watchdog");
+        t.setDaemon(true);
+        return t;
+    });
+
+    static {
+        // Every ping() cancels its own watchdog task once the read loop finishes (the common,
+        // non-hung case) - without this, a cancelled-but-not-yet-due task stays queued until its
+        // original fire time instead of being dropped immediately, letting the queue grow with a
+        // steady stream of concurrent pings (e.g. TraceroutePoller pinging every hop every ~1s).
+        WATCHDOG_EXECUTOR.setRemoveOnCancelPolicy(true);
+    }
+
     private PingProbe() {
     }
 
@@ -46,17 +67,11 @@ public final class PingProbe {
             // unblock (EOF, since destroying the process closes its stdout pipe) instead of
             // hanging this thread indefinitely on a process that never prints another line.
             Process watchedProcess = process;
-            Thread watchdog = new Thread(() -> {
-                try {
-                    if (!watchedProcess.waitFor(timeoutMillis + 2000L, TimeUnit.MILLISECONDS)) {
-                        watchedProcess.destroyForcibly();
-                    }
-                } catch (InterruptedException ignored) {
-                    // best-effort watchdog only
+            ScheduledFuture<?> watchdog = WATCHDOG_EXECUTOR.schedule(() -> {
+                if (watchedProcess.isAlive()) {
+                    watchedProcess.destroyForcibly();
                 }
-            }, "ping-watchdog");
-            watchdog.setDaemon(true);
-            watchdog.start();
+            }, timeoutMillis + 2000L, TimeUnit.MILLISECONDS);
 
             StringBuilder output = new StringBuilder();
             try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream(), CONSOLE_CHARSET))) {
@@ -64,6 +79,8 @@ public final class PingProbe {
                 while ((line = reader.readLine()) != null) {
                     output.append(line).append('\n');
                 }
+            } finally {
+                watchdog.cancel(false);
             }
             boolean finished = process.waitFor(timeoutMillis + 2000L, TimeUnit.MILLISECONDS);
             if (!finished) {

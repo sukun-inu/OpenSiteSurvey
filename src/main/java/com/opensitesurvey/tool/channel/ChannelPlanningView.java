@@ -6,6 +6,7 @@ import com.opensitesurvey.tool.model.ScanSnapshot;
 import com.opensitesurvey.tool.ui.dashboard.AnnotatedAreaChart;
 import com.opensitesurvey.tool.util.CategoricalColorPalette;
 import com.opensitesurvey.tool.util.ChannelUtil;
+import com.opensitesurvey.tool.util.HoverPanelSupport;
 import com.opensitesurvey.tool.util.TooltipSupport;
 import javafx.application.Platform;
 import javafx.geometry.Insets;
@@ -52,7 +53,7 @@ import java.util.stream.Collectors;
  * hidden.
  *
  * <p>Clicking a mountain pins its breakdown in {@link #hoverPanel} in place (see {@code
- * pinnedChannel}) - purely hover-driven display meant the mouse had to stay on that exact curve
+ * pinned}) - purely hover-driven display meant the mouse had to stay on that exact curve
  * for the breakdown to stay visible, so there was no way to move onto the panel itself (e.g. to
  * scroll a long contributor row into view) without losing it. Clicking the same mountain again,
  * or a different one, releases/reassigns the pin.
@@ -79,7 +80,7 @@ public final class ChannelPlanningView {
     private final VBox hoverPanel = new VBox(3);
     private final Label hoverHeader = new Label();
     private final VBox hoverEntriesBox = new VBox(2);
-    private final ScrollPane hoverEntriesScroll = new ScrollPane(hoverEntriesBox);
+    private final ScrollPane hoverEntriesScroll = HoverPanelSupport.scrollableEntries(hoverEntriesBox);
 
     private final List<Panel> panels = new ArrayList<>();
     private final VBox panelsColumn = new VBox(8);
@@ -90,11 +91,11 @@ public final class ChannelPlanningView {
     // Survives across refresh() rebuilds so a live poll tick doesn't blow away the breakdown the
     // user is currently reading - see ChannelPlanner.Recommendation usage below for why.
     private Integer hoveredChannel;
-    // Set by clicking a channel's mountain (see buildPanel()) - while non-null, hover
-    // entered/exited on every curve is ignored, so the breakdown stays exactly as it was
-    // regardless of where the mouse goes (including onto hoverPanel to scroll a long entry).
-    // Clicking the pinned channel again (or a different one) clears/reassigns it.
-    private Integer pinnedChannel;
+    // Set by clicking a channel's mountain (see buildPanel()) - while true, hover entered/exited
+    // on every curve is ignored, so the breakdown (still tracked via hoveredChannel) stays exactly
+    // as it was regardless of where the mouse goes (including onto hoverPanel to scroll a long
+    // entry). Clicking the pinned channel again releases it; clicking a different one re-pins.
+    private boolean pinned;
 
     /** One reusable chart slot: its own frequency axis, score axis, area chart, and annotations. */
     private static final class Panel {
@@ -140,7 +141,7 @@ public final class ChannelPlanningView {
             // a breakdown for an entirely different band/channel the user never touched, just
             // because it happens to share the same number.
             hoveredChannel = null;
-            pinnedChannel = null;
+            pinned = false;
             refresh();
         });
         TooltipSupport.set(bandSelector, Messages.get("tooltip.channelPlanning.bandSelector"));
@@ -159,11 +160,6 @@ public final class ChannelPlanningView {
         // Scrolls instead of clipping when a channel's contributor list has a long "SSID (mac):
         // score (使用率suffix)" row or many contributing APs - see ChartCrosshair's own analogous
         // fix for Dashboard/History's hover panels.
-        hoverEntriesScroll.setFitToWidth(false);
-        hoverEntriesScroll.setFitToHeight(false);
-        hoverEntriesScroll.setHbarPolicy(ScrollPane.ScrollBarPolicy.AS_NEEDED);
-        hoverEntriesScroll.setVbarPolicy(ScrollPane.ScrollBarPolicy.AS_NEEDED);
-        hoverEntriesScroll.getStyleClass().add("crosshair-scroll");
         VBox.setVgrow(hoverEntriesScroll, Priority.ALWAYS);
         hoverPanel.getChildren().addAll(hoverHeader, hoverEntriesScroll);
         showHoverPlaceholder();
@@ -247,7 +243,7 @@ public final class ChannelPlanningView {
             showChannelBreakdown(hoveredChannel, rec);
         } else {
             hoveredChannel = null;
-            pinnedChannel = null;
+            pinned = false;
             showHoverPlaceholder();
         }
 
@@ -364,14 +360,14 @@ public final class ChannelPlanningView {
                     }
                     int channel = curve.channel();
                     seriesGroup.setOnMouseEntered(ev -> {
-                        if (pinnedChannel != null) {
+                        if (pinned) {
                             return;
                         }
                         hoveredChannel = channel;
                         showChannelBreakdown(channel, rec);
                     });
                     seriesGroup.setOnMouseExited(ev -> {
-                        if (pinnedChannel != null) {
+                        if (pinned) {
                             return;
                         }
                         hoveredChannel = null;
@@ -383,12 +379,12 @@ public final class ChannelPlanningView {
                     // already-pinned channel again releases it back to live hover-tracking;
                     // clicking a different channel just re-pins to that one instead.
                     seriesGroup.setOnMouseClicked(ev -> {
-                        if (pinnedChannel != null && pinnedChannel == channel) {
-                            pinnedChannel = null;
+                        if (pinned && hoveredChannel != null && hoveredChannel == channel) {
+                            pinned = false;
                             hoveredChannel = null;
                             showHoverPlaceholder();
                         } else {
-                            pinnedChannel = channel;
+                            pinned = true;
                             hoveredChannel = channel;
                             showChannelBreakdown(channel, rec);
                         }
@@ -489,9 +485,8 @@ public final class ChannelPlanningView {
     }
 
     private void showChannelBreakdown(int channel, ChannelPlanner.Recommendation rec) {
-        String suffix = (pinnedChannel != null && pinnedChannel == channel)
-                ? " " + Messages.get("common.chart.pausedSuffix") : "";
-        hoverHeader.setText(Messages.get("channelPlanning.hover.channelHeader", channel) + suffix);
+        hoverHeader.setText(Messages.get("channelPlanning.hover.channelHeader", channel)
+                + HoverPanelSupport.pausedSuffix(pinned));
         List<ChannelPlanner.Recommendation.ApContribution> contributions =
                 rec.perChannelContributions().getOrDefault(channel, List.of());
         hoverEntriesBox.getChildren().clear();
