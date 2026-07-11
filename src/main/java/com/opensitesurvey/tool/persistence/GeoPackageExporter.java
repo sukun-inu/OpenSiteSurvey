@@ -154,6 +154,7 @@ public final class GeoPackageExporter {
                         recorded_at TEXT,
                         ping_host TEXT,
                         ping_rtt_ms INTEGER,
+                        throughput_mbps REAL,
                         rssi_json TEXT
                     )""");
         }
@@ -162,7 +163,7 @@ public final class GeoPackageExporter {
                 bound(points, p -> p.xNorm, false), bound(points, p -> p.yNorm, false));
 
         try (PreparedStatement ps = conn.prepareStatement(
-                "INSERT INTO survey_points (geom, recorded_at, ping_host, ping_rtt_ms, rssi_json) VALUES (?, ?, ?, ?, ?)")) {
+                "INSERT INTO survey_points (geom, recorded_at, ping_host, ping_rtt_ms, throughput_mbps, rssi_json) VALUES (?, ?, ?, ?, ?, ?)")) {
             for (SurveyPoint p : points) {
                 ps.setBytes(1, encodePointGeometry(p.xNorm, p.yNorm));
                 ps.setString(2, Instant.ofEpochSecond(p.epochSecond).toString());
@@ -172,7 +173,12 @@ public final class GeoPackageExporter {
                 } else {
                     ps.setInt(4, p.pingRttMs);
                 }
-                ps.setString(5, toJson(p.rssiByBssid));
+                if (p.throughputMbps == null) {
+                    ps.setNull(5, Types.REAL);
+                } else {
+                    ps.setDouble(5, p.throughputMbps);
+                }
+                ps.setString(6, toJson(p.rssiByBssid));
                 ps.executeUpdate();
             }
         }

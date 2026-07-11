@@ -40,7 +40,7 @@ public final class CsvExporter {
 
     public static void exportSurveyPoints(List<SurveyPoint> points, File file) throws IOException {
         StringBuilder sb = new StringBuilder();
-        sb.append("timestamp,x_norm,y_norm,bssid,rssi_dbm,ping_host,ping_rtt_ms\n");
+        sb.append("timestamp,x_norm,y_norm,bssid,rssi_dbm,ping_host,ping_rtt_ms,throughput_mbps\n");
         for (SurveyPoint p : points) {
             Instant ts = Instant.ofEpochSecond(p.epochSecond);
             for (Map.Entry<String, Integer> e : p.rssiByBssid.entrySet()) {
@@ -50,7 +50,8 @@ public final class CsvExporter {
                         .append(CsvUtil.escapeField(e.getKey())).append(',')
                         .append(e.getValue()).append(',')
                         .append(CsvUtil.escapeField(p.pingHost)).append(',')
-                        .append(p.pingRttMs == null ? "" : p.pingRttMs).append('\n');
+                        .append(p.pingRttMs == null ? "" : p.pingRttMs).append(',')
+                        .append(p.throughputMbps == null ? "" : p.throughputMbps).append('\n');
             }
         }
         Files.writeString(file.toPath(), sb.toString(), StandardCharsets.UTF_8);

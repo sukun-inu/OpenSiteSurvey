@@ -23,4 +23,9 @@ public final class AppPaths {
     public static File scanLogDbFile() {
         return new File(appDataDir(), "scan-log.db");
     }
+
+    /** Third-party plugin JARs (see {@code com.opensitesurvey.tool.plugin.PluginManager}) - not created eagerly, since most installs have none. */
+    public static File pluginsDir() {
+        return new File(appDataDir(), "plugins");
+    }
 }

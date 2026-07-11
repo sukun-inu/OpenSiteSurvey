@@ -11,6 +11,7 @@ import com.opensitesurvey.tool.persistence.AppConfig;
 import com.opensitesurvey.tool.persistence.AppConfigStore;
 import com.opensitesurvey.tool.persistence.AppPaths;
 import com.opensitesurvey.tool.persistence.ScanLogDatabase;
+import com.opensitesurvey.tool.plugin.PluginManager;
 import com.opensitesurvey.tool.channel.ChannelPlanningView;
 import com.opensitesurvey.tool.security.SecurityAuditView;
 import com.opensitesurvey.tool.ui.dashboard.DashboardView;
@@ -63,6 +64,7 @@ public class App extends Application {
     private ScanLogDatabase scanLogDatabase;
     private AppConfig appConfig;
     private ApiServer apiServer;
+    private PluginManager pluginManager;
     private final java.util.concurrent.atomic.AtomicReference<ScanSnapshot> latestSnapshotRef =
             new java.util.concurrent.atomic.AtomicReference<>();
 
@@ -87,6 +89,7 @@ public class App extends Application {
         AlertContext alertContext = new AlertContext(appConfig);
         AlertEngine alertEngine = new AlertEngine(alertContext);
         NotificationService notificationService = new NotificationService();
+        pluginManager = PluginManager.load(AppPaths.pluginsDir().toPath());
 
         // Shared across every tab so the same BSSID always gets the same identity color,
         // regardless of which view first happened to draw it - a per-view instance would let the
@@ -221,6 +224,9 @@ public class App extends Application {
                     for (com.opensitesurvey.tool.alert.Alert fired : firedAlerts) {
                         notificationService.notify(fired, appConfig.windowsNotificationsEnabled);
                     }
+                    // Same background thread as AlertEngine above - see OpenSiteSurveyPlugin's own
+                    // javadoc for why plugins must not block here.
+                    pluginManager.dispatchSnapshot(snapshot);
 
                     Platform.runLater(() -> {
                         dashboard.onSnapshot(snapshot);
@@ -297,6 +303,7 @@ public class App extends Application {
             if (apiServer != null) {
                 apiServer.stop();
             }
+            pluginManager.close();
         });
     }
 
@@ -330,7 +337,19 @@ public class App extends Application {
             });
             alert.showAndWait();
         });
-        helpMenu.getItems().add(aboutItem);
+        MenuItem pluginsItem = new MenuItem(Messages.get("app.menu.help.plugins"));
+        pluginsItem.setOnAction(e -> {
+            java.util.List<String> names = pluginManager.loadedPluginNames();
+            String body = names.isEmpty()
+                    ? Messages.get("app.plugins.none")
+                    : Messages.get("app.plugins.list", String.join("\n", names));
+            Alert alert = new Alert(Alert.AlertType.INFORMATION, body);
+            alert.setTitle(Messages.get("app.menu.help.plugins"));
+            alert.setHeaderText(null);
+            AppTheme.apply(alert);
+            alert.showAndWait();
+        });
+        helpMenu.getItems().addAll(aboutItem, pluginsItem);
 
         return new MenuBar(fileMenu, toolsMenu, helpMenu);
     }
@@ -352,6 +371,9 @@ public class App extends Application {
         }
         if (apiServer != null) {
             apiServer.stop();
+        }
+        if (pluginManager != null) {
+            pluginManager.close();
         }
         if (scanLogDatabase != null) {
             scanLogDatabase.close();

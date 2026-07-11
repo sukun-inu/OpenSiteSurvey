@@ -19,6 +19,8 @@ public class SurveyPoint {
     public String pingHost;
     /** Round-trip time in milliseconds, or {@code null} if no ping target was set or the ping timed out. */
     public Integer pingRttMs;
+    /** Measured download throughput in Mbps (see {@code ThroughputProbe}), or {@code null} if no throughput test URL was configured or the test failed. */
+    public Double throughputMbps;
 
     public SurveyPoint() {
     }

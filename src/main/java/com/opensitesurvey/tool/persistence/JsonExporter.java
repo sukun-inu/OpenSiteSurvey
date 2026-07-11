@@ -66,6 +66,7 @@ public final class JsonExporter {
             row.put("rssiByBssid", p.rssiByBssid);
             row.put("pingHost", p.pingHost);
             row.put("pingRttMs", p.pingRttMs);
+            row.put("throughputMbps", p.throughputMbps);
             rows.add(row);
         }
         return rows;

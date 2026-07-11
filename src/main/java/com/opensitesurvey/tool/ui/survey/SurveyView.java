@@ -10,6 +10,7 @@ import com.opensitesurvey.tool.persistence.GeoPackageExporter;
 import com.opensitesurvey.tool.persistence.JsonExporter;
 import com.opensitesurvey.tool.persistence.SurveyProjectStore;
 import com.opensitesurvey.tool.ping.PingProbe;
+import com.opensitesurvey.tool.ping.ThroughputProbe;
 import com.opensitesurvey.tool.report.HtmlReportGenerator;
 import com.opensitesurvey.tool.report.PdfReportGenerator;
 import com.opensitesurvey.tool.report.ReportData;
@@ -72,6 +73,7 @@ public final class SurveyView {
     private final ComboBox<String> targetSelector = new ComboBox<>();
     private static final String ALGO_IDW = "IDW";
     private static final String ALGO_KRIGING = "Kriging";
+    private static final String ALGO_NATURAL_NEIGHBOR = "Natural Neighbor";
     private final ComboBox<String> algorithmSelector = new ComboBox<>();
     private final ToggleButton surveyModeToggle = new ToggleButton(Messages.get("survey.toggle.measureModeOff"));
     private final Label statusLabel = new Label(Messages.get("survey.status.loadFloorPlanPrompt"));
@@ -79,6 +81,17 @@ public final class SurveyView {
     private final TextField pingHostField = new TextField();
     private final ExecutorService pingExecutor = Executors.newSingleThreadExecutor(r -> {
         Thread t = new Thread(r, "survey-ping");
+        t.setDaemon(true);
+        return t;
+    });
+
+    // Active Survey throughput (see ThroughputProbe) - optional, like ping: empty URL disables it.
+    // Runs on its own executor (not pingExecutor) so a several-second throughput test at one point
+    // doesn't delay the (much faster) ping result for the same or a later point.
+    private final TextField throughputUrlField = new TextField();
+    private static final int THROUGHPUT_TEST_DURATION_MILLIS = 3000;
+    private final ExecutorService throughputExecutor = Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "survey-throughput");
         t.setDaemon(true);
         return t;
     });
@@ -108,6 +121,17 @@ public final class SurveyView {
     private final CheckBox coverageHoleToggle = new CheckBox(Messages.get("survey.toggle.coverageHoles"));
     private final TextField coverageThresholdField = new TextField("-75");
     private final Label coverageSummaryLabel = new Label("");
+
+    // Coverage Requirements: a one-shot check (like ApPlacementAdvisor's suggestion button) against
+    // three fixed use-case profiles (see CoverageRequirementEvaluator) rather than a continuous
+    // overlay, since the profiles themselves never change.
+    private final Label coverageRequirementsSummaryLabel = new Label("");
+
+    // Roaming analysis (see RoamingAnalyzer) - a continuously redrawn overlay like the other
+    // toggles above, since it only re-groups already-recorded points/SSIDs rather than running a
+    // search.
+    private final CheckBox roamingAnalysisToggle = new CheckBox(Messages.get("survey.toggle.roamingAnalysis"));
+    private final TextField roamingGapThresholdField = new TextField("10");
 
     // Heuristic estimated-AP-position markers (see ApPositionEstimator) - drawn for every BSSID
     // seen so far, not just the current heatmap target, since this is meant as an overview of
@@ -184,7 +208,7 @@ public final class SurveyView {
         });
         TooltipSupport.set(targetSelector, Messages.get("tooltip.survey.targetSelector"));
 
-        algorithmSelector.getItems().setAll(ALGO_IDW, ALGO_KRIGING);
+        algorithmSelector.getItems().setAll(ALGO_IDW, ALGO_KRIGING, ALGO_NATURAL_NEIGHBOR);
         algorithmSelector.getSelectionModel().select(ALGO_IDW);
         algorithmSelector.setOnAction(e -> redraw());
         TooltipSupport.set(algorithmSelector, Messages.get("tooltip.survey.algorithmSelector"));
@@ -220,6 +244,10 @@ public final class SurveyView {
         pingHostField.setPrefWidth(130);
         TooltipSupport.set(pingHostField, Messages.get("tooltip.survey.pingHost"));
 
+        throughputUrlField.setPromptText(Messages.get("survey.throughputUrl.prompt"));
+        throughputUrlField.setPrefWidth(160);
+        TooltipSupport.set(throughputUrlField, Messages.get("tooltip.survey.throughputUrl"));
+
         Button reportHtmlButton = new Button(Messages.get("survey.button.exportReportHtml"));
         reportHtmlButton.setOnAction(e -> exportReport(true));
         TooltipSupport.set(reportHtmlButton, Messages.get("tooltip.survey.reportHtml"));
@@ -244,6 +272,21 @@ public final class SurveyView {
         Button suggestApPlacementButton = new Button(Messages.get("survey.button.suggestApPlacement"));
         suggestApPlacementButton.setOnAction(e -> onSuggestApPlacement());
         TooltipSupport.set(suggestApPlacementButton, Messages.get("tooltip.survey.suggestApPlacement"));
+
+        Button checkCoverageRequirementsButton = new Button(Messages.get("survey.button.checkCoverageRequirements"));
+        checkCoverageRequirementsButton.setOnAction(e -> onCheckCoverageRequirements());
+        TooltipSupport.set(checkCoverageRequirementsButton, Messages.get("tooltip.survey.checkCoverageRequirements"));
+
+        roamingAnalysisToggle.setOnAction(e -> redraw());
+        TooltipSupport.set(roamingAnalysisToggle, Messages.get("tooltip.survey.roamingAnalysisToggle"));
+        roamingGapThresholdField.setPrefWidth(50);
+        roamingGapThresholdField.setOnAction(e -> redraw());
+        roamingGapThresholdField.focusedProperty().addListener((obs, was, is) -> {
+            if (!is) {
+                redraw();
+            }
+        });
+        TooltipSupport.set(roamingGapThresholdField, Messages.get("tooltip.survey.roamingGapThreshold"));
 
         Button loadComparisonButton = new Button(Messages.get("survey.button.loadComparison"));
         loadComparisonButton.setOnAction(e -> onLoadComparison());
@@ -273,6 +316,7 @@ public final class SurveyView {
         HBox toolbarRow1 = new HBox(8, loadFloorPlanButton, new Label(Messages.get("survey.label.targetAp")), targetSelector,
                 new Label(Messages.get("survey.label.algorithm")), algorithmSelector,
                 surveyModeToggle, new Label(Messages.get("survey.label.ping")), pingHostField,
+                new Label(Messages.get("survey.label.throughputUrl")), throughputUrlField,
                 clearButton, saveButton, loadButton, exportCsvButton, exportJsonButton, exportGeoPackageButton,
                 reportHtmlButton, reportPdfButton);
         toolbarRow1.setAlignment(Pos.CENTER_LEFT);
@@ -282,7 +326,11 @@ public final class SurveyView {
                 loadComparisonButton, comparisonModeToggle);
         toolbarRow2.setAlignment(Pos.CENTER_LEFT);
 
-        VBox toolbar = new VBox(4, toolbarRow1, toolbarRow2);
+        HBox toolbarRow3 = new HBox(8, checkCoverageRequirementsButton, roamingAnalysisToggle,
+                new Label(Messages.get("survey.label.roamingGapThreshold")), roamingGapThresholdField);
+        toolbarRow3.setAlignment(Pos.CENTER_LEFT);
+
+        VBox toolbar = new VBox(4, toolbarRow1, toolbarRow2, toolbarRow3);
         toolbar.setPadding(new Insets(8));
         root.setTop(toolbar);
     }
@@ -325,6 +373,19 @@ public final class SurveyView {
                     });
                 });
             }
+
+            String throughputUrl = throughputUrlField.getText() == null ? "" : throughputUrlField.getText().trim();
+            if (!throughputUrl.isEmpty()) {
+                throughputExecutor.execute(() -> {
+                    Double mbps = ThroughputProbe.measure(throughputUrl, THROUGHPUT_TEST_DURATION_MILLIS).orElse(null);
+                    Platform.runLater(() -> {
+                        point.throughputMbps = mbps;
+                        String throughputResult = mbps != null
+                                ? Messages.get("survey.throughput.mbps", mbps) : Messages.get("survey.throughput.failed");
+                        statusLabel.setText(Messages.get("survey.status.pointCountWithThroughput", points.size(), throughputResult));
+                    });
+                });
+            }
         });
     }
 
@@ -346,9 +407,11 @@ public final class SurveyView {
         }
         coverageSummaryLabel.setWrapText(true);
         coverageSummaryLabel.setMaxWidth(180);
+        coverageRequirementsSummaryLabel.setWrapText(true);
+        coverageRequirementsSummaryLabel.setMaxWidth(180);
         comparisonSummaryLabel.setWrapText(true);
         comparisonSummaryLabel.setMaxWidth(180);
-        legend.getChildren().addAll(coverageSummaryLabel, comparisonSummaryLabel);
+        legend.getChildren().addAll(coverageSummaryLabel, coverageRequirementsSummaryLabel, comparisonSummaryLabel);
         return legend;
     }
 
@@ -703,8 +766,14 @@ public final class SurveyView {
     }
 
     private Interpolator currentInterpolator() {
-        return ALGO_KRIGING.equals(algorithmSelector.getSelectionModel().getSelectedItem())
-                ? KrigingInterpolator.INSTANCE : IdwInterpolator.INSTANCE;
+        String selected = algorithmSelector.getSelectionModel().getSelectedItem();
+        if (ALGO_KRIGING.equals(selected)) {
+            return KrigingInterpolator.INSTANCE;
+        }
+        if (ALGO_NATURAL_NEIGHBOR.equals(selected)) {
+            return NaturalNeighborInterpolator.INSTANCE;
+        }
+        return IdwInterpolator.INSTANCE;
     }
 
     private void redraw() {
@@ -776,6 +845,42 @@ public final class SurveyView {
         if (!apPlacementSuggestions.isEmpty()) {
             drawApPlacementSuggestions(gc);
         }
+
+        if (roamingAnalysisToggle.isSelected() && !points.isEmpty()) {
+            drawRoamingAnalysis(gc);
+        }
+    }
+
+    /**
+     * Draws a yellow triangle marker (distinct from every other marker shape used above) at each
+     * {@link RoamingAnalyzer} overlap point, labeled with the SSID and the RSSI gap between the two
+     * competing BSSIDs. An unparsable gap threshold falls back to 10dB rather than silently
+     * disabling the feature (same convention as {@link #parsedCoverageThreshold()}).
+     */
+    private void drawRoamingAnalysis(GraphicsContext gc) {
+        int maxGapDb;
+        try {
+            maxGapDb = Integer.parseInt(roamingGapThresholdField.getText().trim());
+        } catch (NumberFormatException e) {
+            maxGapDb = 10;
+        }
+        Color markerColor = Color.web("#f7d716");
+        for (RoamingAnalyzer.OverlapPoint overlap : RoamingAnalyzer.analyze(points, ssidByBssid, maxGapDb)) {
+            double px = overlap.xNorm() * canvas.getWidth();
+            double py = overlap.yNorm() * canvas.getHeight();
+            double[] xs = {px, px - 7, px + 7};
+            double[] ys = {py - 8, py + 6, py + 6};
+            gc.setFill(Color.web("#1e2228"));
+            gc.fillOval(px - 9, py - 9, 18, 18);
+            gc.setFill(markerColor);
+            gc.fillPolygon(xs, ys, 3);
+            gc.setStroke(Color.BLACK);
+            gc.setLineWidth(1);
+            gc.strokePolygon(xs, ys, 3);
+
+            gc.setFill(markerColor);
+            gc.fillText(Messages.get("survey.roaming.markerLabel", overlap.ssid(), overlap.gapDb()), px + 10, py + 4);
+        }
     }
 
     /**
@@ -798,6 +903,30 @@ public final class SurveyView {
             showAlert(Messages.get("survey.placement.noSuggestions"));
         }
         redraw();
+    }
+
+    /**
+     * Checks the currently-displayed heatmap (same points/target/interpolator the user is already
+     * looking at) against {@link CoverageRequirementEvaluator}'s fixed Voice/Video/Data profiles
+     * and shows the resulting coverage percentages in {@link #coverageRequirementsSummaryLabel} - a
+     * one-shot check rather than a continuous overlay, since the three profiles themselves never
+     * change between clicks.
+     */
+    private void onCheckCoverageRequirements() {
+        if (points.isEmpty()) {
+            showAlert(Messages.get("survey.alert.noPointsForSuggestion"));
+            return;
+        }
+        String target = targetSelector.getSelectionModel().getSelectedItem();
+        String targetBssid = (target == null || target.isEmpty()) ? null : target;
+        Double[][] valueGrid = HeatmapRenderer.computeValueGrid(points, targetBssid, currentInterpolator());
+        List<CoverageRequirementEvaluator.Result> results =
+                CoverageRequirementEvaluator.evaluate(valueGrid, CoverageRequirementEvaluator.DEFAULT_REQUIREMENTS);
+        StringBuilder sb = new StringBuilder(Messages.get("survey.coverageRequirements.legend"));
+        for (CoverageRequirementEvaluator.Result r : results) {
+            sb.append('\n').append(Messages.get("survey.coverageRequirements.line", r.name(), r.minRssiDbm(), r.coveragePercent()));
+        }
+        coverageRequirementsSummaryLabel.setText(sb.toString());
     }
 
     /**
