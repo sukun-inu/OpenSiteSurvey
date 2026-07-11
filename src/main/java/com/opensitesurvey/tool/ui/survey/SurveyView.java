@@ -1,5 +1,8 @@
 package com.opensitesurvey.tool.ui.survey;
 
+import com.opensitesurvey.tool.gps.GeoReference;
+import com.opensitesurvey.tool.gps.GpsProbe;
+import com.opensitesurvey.tool.gps.PathSampler;
 import com.opensitesurvey.tool.i18n.Messages;
 import com.opensitesurvey.tool.model.ApSnapshot;
 import com.opensitesurvey.tool.model.ScanSnapshot;
@@ -104,6 +107,20 @@ public final class SurveyView {
         t.setDaemon(true);
         return t;
     });
+
+    // GPS walking heatmap (indoor + outdoor): calibrate GeoReference once via GpsCalibrationDialog
+    // against the currently-loaded background image, then toggle auto-recording to turn a live GPS
+    // position stream (GpsProbe) into discrete survey points (PathSampler), reusing recordPoint()
+    // exactly like a manual click - see recordPoint()'s own javadoc.
+    private List<GeoReference.CalibrationPoint> calibrationPoints = new ArrayList<>();
+    private GeoReference geoReference;
+    private GpsProbe gpsProbe;
+    private PathSampler pathSampler;
+    private final Button gpsCalibrateButton = new Button(Messages.get("survey.button.gpsCalibrate"));
+    private final ToggleButton gpsAutoRecordToggle = new ToggleButton(Messages.get("survey.toggle.gpsAutoRecordOff"));
+    private final TextField gpsMinDistanceMetersField = new TextField("3");
+    private final TextField gpsMaxAccuracyMetersField = new TextField("30");
+    private final Label gpsStatusLabel = new Label("");
 
     private final Map<String, String> ssidByBssid = new HashMap<>();
     private final List<SurveyPoint> points = new ArrayList<>();
@@ -288,6 +305,22 @@ public final class SurveyView {
         });
         TooltipSupport.set(roamingGapThresholdField, Messages.get("tooltip.survey.roamingGapThreshold"));
 
+        gpsCalibrateButton.setOnAction(e -> onGpsCalibrate());
+        TooltipSupport.set(gpsCalibrateButton, Messages.get("tooltip.survey.gpsCalibrate"));
+        gpsAutoRecordToggle.setDisable(true); // enabled once GPS calibration succeeds
+        gpsAutoRecordToggle.setOnAction(e -> {
+            if (gpsAutoRecordToggle.isSelected()) {
+                startGpsAutoRecord();
+            } else {
+                stopGpsAutoRecord();
+            }
+        });
+        TooltipSupport.set(gpsAutoRecordToggle, Messages.get("tooltip.survey.gpsAutoRecordToggle"));
+        gpsMinDistanceMetersField.setPrefWidth(50);
+        TooltipSupport.set(gpsMinDistanceMetersField, Messages.get("tooltip.survey.gpsMinDistance"));
+        gpsMaxAccuracyMetersField.setPrefWidth(50);
+        TooltipSupport.set(gpsMaxAccuracyMetersField, Messages.get("tooltip.survey.gpsMaxAccuracy"));
+
         Button loadComparisonButton = new Button(Messages.get("survey.button.loadComparison"));
         loadComparisonButton.setOnAction(e -> onLoadComparison());
         TooltipSupport.set(loadComparisonButton, Messages.get("tooltip.survey.loadComparison"));
@@ -330,7 +363,13 @@ public final class SurveyView {
                 new Label(Messages.get("survey.label.roamingGapThreshold")), roamingGapThresholdField);
         toolbarRow3.setAlignment(Pos.CENTER_LEFT);
 
-        VBox toolbar = new VBox(4, toolbarRow1, toolbarRow2, toolbarRow3);
+        HBox toolbarRow4 = new HBox(8, gpsCalibrateButton, gpsAutoRecordToggle,
+                new Label(Messages.get("survey.label.gpsMinDistance")), gpsMinDistanceMetersField,
+                new Label(Messages.get("survey.label.gpsMaxAccuracy")), gpsMaxAccuracyMetersField,
+                gpsStatusLabel);
+        toolbarRow4.setAlignment(Pos.CENTER_LEFT);
+
+        VBox toolbar = new VBox(4, toolbarRow1, toolbarRow2, toolbarRow3, toolbarRow4);
         toolbar.setPadding(new Insets(8));
         root.setTop(toolbar);
     }
@@ -351,42 +390,133 @@ public final class SurveyView {
             }
             double xNorm = e.getX() / canvas.getWidth();
             double yNorm = e.getY() / canvas.getHeight();
-            Map<String, Integer> rssiByBssid = new LinkedHashMap<>();
-            for (ApSnapshot ap : latestSnapshot.accessPoints()) {
-                rssiByBssid.put(ap.bssid(), ap.rssiDbm());
-            }
-            SurveyPoint point = new SurveyPoint(xNorm, yNorm, rssiByBssid, Instant.now());
-            points.add(point);
-            statusLabel.setText(Messages.get("survey.status.pointCount", points.size()));
-            redraw();
+            recordPoint(xNorm, yNorm);
+        });
+    }
 
-            String pingHost = pingHostField.getText() == null ? "" : pingHostField.getText().trim();
-            if (!pingHost.isEmpty()) {
-                point.pingHost = pingHost;
-                pingExecutor.execute(() -> {
-                    Integer rttMs = PingProbe.ping(pingHost, 1000).orElse(null);
-                    Platform.runLater(() -> {
-                        point.pingRttMs = rttMs;
-                        String pingResult = rttMs != null
-                                ? Messages.get("survey.ping.rttMs", rttMs) : Messages.get("survey.ping.noResponse");
-                        statusLabel.setText(Messages.get("survey.status.pointCountWithPing", points.size(), pingHost, pingResult));
-                    });
-                });
-            }
+    /**
+     * Records a new survey point at the given normalized (0..1) image coordinates - shared by the
+     * manual canvas-click path above and the GPS auto-record path (see {@link #onGpsPosition}),
+     * so both use exactly the same Wi-Fi snapshot / optional ping / optional throughput recording
+     * logic instead of duplicating it. Must be called on the JavaFX Application thread, with
+     * {@link #floorPlanImage}/{@link #latestSnapshot} already confirmed non-null by the caller -
+     * each caller handles a missing precondition differently (the manual click path shows a
+     * blocking alert; the GPS path just skips silently, since popping an alert on every position
+     * update would be disruptive).
+     */
+    private void recordPoint(double xNorm, double yNorm) {
+        Map<String, Integer> rssiByBssid = new LinkedHashMap<>();
+        for (ApSnapshot ap : latestSnapshot.accessPoints()) {
+            rssiByBssid.put(ap.bssid(), ap.rssiDbm());
+        }
+        SurveyPoint point = new SurveyPoint(xNorm, yNorm, rssiByBssid, Instant.now());
+        points.add(point);
+        statusLabel.setText(Messages.get("survey.status.pointCount", points.size()));
+        redraw();
 
-            String throughputUrl = throughputUrlField.getText() == null ? "" : throughputUrlField.getText().trim();
-            if (!throughputUrl.isEmpty()) {
-                throughputExecutor.execute(() -> {
-                    Double mbps = ThroughputProbe.measure(throughputUrl, THROUGHPUT_TEST_DURATION_MILLIS).orElse(null);
-                    Platform.runLater(() -> {
-                        point.throughputMbps = mbps;
-                        String throughputResult = mbps != null
-                                ? Messages.get("survey.throughput.mbps", mbps) : Messages.get("survey.throughput.failed");
-                        statusLabel.setText(Messages.get("survey.status.pointCountWithThroughput", points.size(), throughputResult));
-                    });
+        String pingHost = pingHostField.getText() == null ? "" : pingHostField.getText().trim();
+        if (!pingHost.isEmpty()) {
+            point.pingHost = pingHost;
+            pingExecutor.execute(() -> {
+                Integer rttMs = PingProbe.ping(pingHost, 1000).orElse(null);
+                Platform.runLater(() -> {
+                    point.pingRttMs = rttMs;
+                    String pingResult = rttMs != null
+                            ? Messages.get("survey.ping.rttMs", rttMs) : Messages.get("survey.ping.noResponse");
+                    statusLabel.setText(Messages.get("survey.status.pointCountWithPing", points.size(), pingHost, pingResult));
                 });
+            });
+        }
+
+        String throughputUrl = throughputUrlField.getText() == null ? "" : throughputUrlField.getText().trim();
+        if (!throughputUrl.isEmpty()) {
+            throughputExecutor.execute(() -> {
+                Double mbps = ThroughputProbe.measure(throughputUrl, THROUGHPUT_TEST_DURATION_MILLIS).orElse(null);
+                Platform.runLater(() -> {
+                    point.throughputMbps = mbps;
+                    String throughputResult = mbps != null
+                            ? Messages.get("survey.throughput.mbps", mbps) : Messages.get("survey.throughput.failed");
+                    statusLabel.setText(Messages.get("survey.status.pointCountWithThroughput", points.size(), throughputResult));
+                });
+            });
+        }
+    }
+
+    /** Opens {@link GpsCalibrationDialog} against the current background image, storing the result for both auto-recording and project persistence. */
+    private void onGpsCalibrate() {
+        if (floorPlanImage == null) {
+            showAlert(Messages.get("survey.alert.floorPlanRequired"));
+            return;
+        }
+        GpsCalibrationDialog.show(currentStage(), floorPlanImage, calibrationPoints).ifPresent(result -> {
+            geoReference = result.geoReference();
+            calibrationPoints = new ArrayList<>(result.calibrationPoints());
+            gpsAutoRecordToggle.setDisable(false);
+            gpsStatusLabel.setText(Messages.get("survey.gps.calibrated", calibrationPoints.size()));
+        });
+    }
+
+    /**
+     * Starts turning a live GPS position stream into recorded survey points: {@link PathSampler}
+     * is (re)configured here (not held as a single long-lived instance) since its distance
+     * threshold depends on {@link GeoReference#metersPerNormUnit()}, only known once calibrated.
+     */
+    private void startGpsAutoRecord() {
+        double minDistanceMeters = parseDoubleOrDefault(gpsMinDistanceMetersField.getText(), 3.0);
+        double maxAccuracyMeters = parseDoubleOrDefault(gpsMaxAccuracyMetersField.getText(), 30.0);
+        double metersPerNormUnit = geoReference.metersPerNormUnit();
+        double minDistanceNorm = metersPerNormUnit > 0 ? minDistanceMeters / metersPerNormUnit : 0.01;
+        pathSampler = new PathSampler(minDistanceNorm, maxAccuracyMeters);
+        gpsProbe = new GpsProbe(
+                this::onGpsPosition,
+                status -> Platform.runLater(() -> gpsStatusLabel.setText(Messages.get("survey.gps.error", status))));
+        gpsProbe.start();
+        gpsAutoRecordToggle.setText(Messages.get("survey.toggle.gpsAutoRecordOn"));
+    }
+
+    private void stopGpsAutoRecord() {
+        if (gpsProbe != null) {
+            gpsProbe.stop();
+            gpsProbe = null;
+        }
+        gpsAutoRecordToggle.setText(Messages.get("survey.toggle.gpsAutoRecordOff"));
+        gpsStatusLabel.setText("");
+    }
+
+    /** Stops any active GPS auto-record subprocess - call when the app is shutting down (mirrors {@code TracerouteView.shutdown()}). */
+    public void shutdownGps() {
+        stopGpsAutoRecord();
+    }
+
+    /**
+     * Called on {@link GpsProbe}'s own background reader thread - marshals to the JavaFX
+     * Application thread itself, since {@code GpsProbe}'s contract leaves that to the caller (same
+     * convention as {@code WlanPoller}/{@code TraceroutePoller}).
+     */
+    private void onGpsPosition(GpsProbe.Position position) {
+        Platform.runLater(() -> {
+            gpsStatusLabel.setText(Messages.get("survey.gps.currentFix", position.horizontalAccuracyMeters()));
+            if (geoReference == null || floorPlanImage == null || latestSnapshot == null) {
+                // Not ready to record yet (e.g. still waiting for the first Wi-Fi scan) - the
+                // status label above already reflects the live GPS fix, so just skip this update
+                // silently rather than popping the same alert recordPoint()'s manual-click caller
+                // would show on every position tick.
+                return;
+            }
+            GeoReference.ImagePoint projected = geoReference.project(position.latitude(), position.longitude());
+            if (pathSampler.shouldRecord(projected, position.horizontalAccuracyMeters())) {
+                pathSampler.markRecorded(projected);
+                recordPoint(projected.xNorm(), projected.yNorm());
             }
         });
+    }
+
+    private static double parseDoubleOrDefault(String text, double fallback) {
+        try {
+            return Double.parseDouble(text.trim());
+        } catch (Exception e) {
+            return fallback;
+        }
     }
 
     private javafx.scene.Node buildLegend() {
@@ -466,8 +596,21 @@ public final class SurveyView {
         loadFloorPlanFile(file);
         points.clear();
         apPlacementSuggestions = List.of();
+        clearGpsCalibration();
         statusLabel.setText(Messages.get("survey.status.floorPlanLoaded", file.getName()));
         redraw();
+    }
+
+    /**
+     * Clears any GPS calibration - called whenever the background image changes, since a stale
+     * {@link GeoReference} fitted against a *different* image would silently mis-place every new
+     * auto-recorded point (same rationale as {@link #clearComparisonState()}).
+     */
+    private void clearGpsCalibration() {
+        stopGpsAutoRecord();
+        geoReference = null;
+        calibrationPoints = new ArrayList<>();
+        gpsAutoRecordToggle.setDisable(true);
     }
 
     /**
@@ -577,6 +720,7 @@ public final class SurveyView {
             if (floorPlanImageBytes != null) {
                 project.floorPlanImageBase64 = Base64.getEncoder().encodeToString(floorPlanImageBytes);
             }
+            project.calibrationPoints = calibrationPoints;
             SurveyProjectStore.save(project, file);
             statusLabel.setText(Messages.get("survey.status.saved", file.getName()));
         } catch (Exception e) {
@@ -619,6 +763,11 @@ public final class SurveyView {
                     points.clear();
                     points.addAll(project.points);
                     apPlacementSuggestions = List.of();
+                    stopGpsAutoRecord();
+                    calibrationPoints = project.calibrationPoints != null
+                            ? new ArrayList<>(project.calibrationPoints) : new ArrayList<>();
+                    geoReference = GeoReference.fit(calibrationPoints);
+                    gpsAutoRecordToggle.setDisable(geoReference == null);
                     statusLabel.setText(Messages.get("survey.status.projectLoaded", file.getName(), points.size()));
                     redraw();
                 });

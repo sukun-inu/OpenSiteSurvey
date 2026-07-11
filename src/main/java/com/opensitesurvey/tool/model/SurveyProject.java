@@ -1,5 +1,7 @@
 package com.opensitesurvey.tool.model;
 
+import com.opensitesurvey.tool.gps.GeoReference;
+
 import java.util.ArrayList;
 import java.util.List;
 
@@ -18,6 +20,15 @@ public class SurveyProject {
      * those fall back to resolving {@link #floorPlanPath} on load, same as before.
      */
     public String floorPlanImageBase64;
+
+    /**
+     * GPS calibration reference points (see {@code com.opensitesurvey.tool.gps.GeoReference}),
+     * empty for a project that has never been GPS-calibrated. Persisting the raw reference points
+     * (rather than the fitted transform coefficients) means the fit can be recomputed - e.g. after
+     * adding another calibration point, or if the fitting algorithm itself ever changes - without
+     * needing to re-walk to every reference location again.
+     */
+    public List<GeoReference.CalibrationPoint> calibrationPoints = new ArrayList<>();
 
     public SurveyProject() {
     }

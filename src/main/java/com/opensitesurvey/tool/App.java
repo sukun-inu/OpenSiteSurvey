@@ -300,6 +300,7 @@ public class App extends Application {
         primaryStage.setOnCloseRequest(e -> {
             poller.stop();
             tracerouteView.shutdown();
+            survey.shutdownGps();
             if (apiServer != null) {
                 apiServer.stop();
             }
