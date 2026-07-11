@@ -32,9 +32,11 @@ import javafx.scene.control.CheckBox;
 import javafx.scene.control.ComboBox;
 import javafx.scene.control.Label;
 import javafx.scene.control.TextField;
+import javafx.scene.control.TitledPane;
 import javafx.scene.control.ToggleButton;
 import javafx.scene.image.Image;
 import javafx.scene.layout.BorderPane;
+import javafx.scene.layout.FlowPane;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.StackPane;
@@ -108,16 +110,30 @@ public final class SurveyView {
         return t;
     });
 
-    // GPS walking heatmap (indoor + outdoor): calibrate GeoReference once via GpsCalibrationDialog
-    // against the currently-loaded background image, then toggle auto-recording to turn a live GPS
-    // position stream (GpsProbe) into discrete survey points (PathSampler), reusing recordPoint()
-    // exactly like a manual click - see recordPoint()'s own javadoc.
+    // Walking heatmap (indoor + outdoor): auto-record survey points from a continuous position
+    // stream instead of manual clicks, reusing recordPoint() exactly like a manual click (see its
+    // own javadoc). Two interchangeable position sources share the same toggle/PathSampler/
+    // recordPoint plumbing:
+    //  - GPS: calibrate a GeoReference once via GpsCalibrationDialog against the currently-loaded
+    //    background image, then GpsProbe streams live lat/lon. Needs calibration; works outdoors,
+    //    degrades or fails indoors.
+    //  - Wi-Fi: WifiPositionEstimator estimates the current position from APs whose position was
+    //    already estimated (ApPositionEstimator) from survey points recorded so far, weighted by
+    //    their live RSSI. Needs no calibration at all and works indoors where GPS can't get a fix,
+    //    but needs a handful of points recorded first before any AP has a known position.
+    private static final String POSITION_SOURCE_GPS = "GPS";
+    private static final String POSITION_SOURCE_WIFI = "Wi-Fi";
     private List<GeoReference.CalibrationPoint> calibrationPoints = new ArrayList<>();
     private GeoReference geoReference;
     private GpsProbe gpsProbe;
     private PathSampler pathSampler;
+    // Recomputed (see refreshKnownApPositions()) whenever points changes, so a Wi-Fi position fix
+    // always uses the latest AP-position knowledge - including AP positions learned from points
+    // recorded by Wi-Fi auto-record itself, letting a walking session bootstrap its own accuracy.
+    private final Map<String, ApPositionEstimator.Estimate> knownApPositions = new HashMap<>();
     private final Button gpsCalibrateButton = new Button(Messages.get("survey.button.gpsCalibrate"));
-    private final ToggleButton gpsAutoRecordToggle = new ToggleButton(Messages.get("survey.toggle.gpsAutoRecordOff"));
+    private final ComboBox<String> positionSourceSelector = new ComboBox<>();
+    private final ToggleButton autoRecordToggle = new ToggleButton(Messages.get("survey.toggle.autoRecordOff"));
     private final TextField gpsMinDistanceMetersField = new TextField("3");
     private final TextField gpsMaxAccuracyMetersField = new TextField("30");
     private final Label gpsStatusLabel = new Label("");
@@ -307,15 +323,19 @@ public final class SurveyView {
 
         gpsCalibrateButton.setOnAction(e -> onGpsCalibrate());
         TooltipSupport.set(gpsCalibrateButton, Messages.get("tooltip.survey.gpsCalibrate"));
-        gpsAutoRecordToggle.setDisable(true); // enabled once GPS calibration succeeds
-        gpsAutoRecordToggle.setOnAction(e -> {
-            if (gpsAutoRecordToggle.isSelected()) {
-                startGpsAutoRecord();
+        positionSourceSelector.getItems().setAll(POSITION_SOURCE_GPS, POSITION_SOURCE_WIFI);
+        positionSourceSelector.getSelectionModel().select(POSITION_SOURCE_GPS);
+        positionSourceSelector.setOnAction(e -> updateAutoRecordAvailability());
+        TooltipSupport.set(positionSourceSelector, Messages.get("tooltip.survey.positionSource"));
+        updateAutoRecordAvailability(); // GPS selected by default, disabled until calibrated
+        autoRecordToggle.setOnAction(e -> {
+            if (autoRecordToggle.isSelected()) {
+                startAutoRecord();
             } else {
-                stopGpsAutoRecord();
+                stopAutoRecord();
             }
         });
-        TooltipSupport.set(gpsAutoRecordToggle, Messages.get("tooltip.survey.gpsAutoRecordToggle"));
+        TooltipSupport.set(autoRecordToggle, Messages.get("tooltip.survey.autoRecordToggle"));
         gpsMinDistanceMetersField.setPrefWidth(50);
         TooltipSupport.set(gpsMinDistanceMetersField, Messages.get("tooltip.survey.gpsMinDistance"));
         gpsMaxAccuracyMetersField.setPrefWidth(50);
@@ -346,30 +366,44 @@ public final class SurveyView {
         });
         TooltipSupport.set(comparisonModeToggle, Messages.get("tooltip.survey.comparisonToggle"));
 
-        HBox toolbarRow1 = new HBox(8, loadFloorPlanButton, new Label(Messages.get("survey.label.targetAp")), targetSelector,
+        // The toolbar used to be 4 flat HBox rows that grew a new button/field every time a
+        // feature was added, until it overflowed the window width and button labels started
+        // getting clipped. Grouped into named, independently-collapsible sections instead: only
+        // "計測・保存" (the controls used on essentially every survey) starts expanded, and each
+        // section uses a FlowPane rather than a fixed-width HBox so it wraps to multiple lines
+        // instead of clipping if a narrower window still can't fit one section's controls on one
+        // line.
+        FlowPane measurementFlow = new FlowPane(8, 4, loadFloorPlanButton,
+                new Label(Messages.get("survey.label.targetAp")), targetSelector,
                 new Label(Messages.get("survey.label.algorithm")), algorithmSelector,
                 surveyModeToggle, new Label(Messages.get("survey.label.ping")), pingHostField,
                 new Label(Messages.get("survey.label.throughputUrl")), throughputUrlField,
-                clearButton, saveButton, loadButton, exportCsvButton, exportJsonButton, exportGeoPackageButton,
-                reportHtmlButton, reportPdfButton);
-        toolbarRow1.setAlignment(Pos.CENTER_LEFT);
+                clearButton, saveButton, loadButton);
+        TitledPane measurementPane = new TitledPane(Messages.get("survey.section.measurement"), measurementFlow);
+        measurementPane.setExpanded(true);
 
-        HBox toolbarRow2 = new HBox(8, coverageHoleToggle, new Label(Messages.get("survey.label.coverageThreshold")),
-                coverageThresholdField, estimatedApPositionsToggle, suggestApPlacementButton,
+        FlowPane analysisFlow = new FlowPane(8, 4, coverageHoleToggle,
+                new Label(Messages.get("survey.label.coverageThreshold")), coverageThresholdField,
+                estimatedApPositionsToggle, suggestApPlacementButton, checkCoverageRequirementsButton,
+                roamingAnalysisToggle, new Label(Messages.get("survey.label.roamingGapThreshold")), roamingGapThresholdField,
                 loadComparisonButton, comparisonModeToggle);
-        toolbarRow2.setAlignment(Pos.CENTER_LEFT);
+        TitledPane analysisPane = new TitledPane(Messages.get("survey.section.analysis"), analysisFlow);
+        analysisPane.setExpanded(false);
 
-        HBox toolbarRow3 = new HBox(8, checkCoverageRequirementsButton, roamingAnalysisToggle,
-                new Label(Messages.get("survey.label.roamingGapThreshold")), roamingGapThresholdField);
-        toolbarRow3.setAlignment(Pos.CENTER_LEFT);
-
-        HBox toolbarRow4 = new HBox(8, gpsCalibrateButton, gpsAutoRecordToggle,
+        FlowPane positionFlow = new FlowPane(8, 4, gpsCalibrateButton,
+                new Label(Messages.get("survey.label.positionSource")), positionSourceSelector, autoRecordToggle,
                 new Label(Messages.get("survey.label.gpsMinDistance")), gpsMinDistanceMetersField,
                 new Label(Messages.get("survey.label.gpsMaxAccuracy")), gpsMaxAccuracyMetersField,
                 gpsStatusLabel);
-        toolbarRow4.setAlignment(Pos.CENTER_LEFT);
+        TitledPane positionPane = new TitledPane(Messages.get("survey.section.position"), positionFlow);
+        positionPane.setExpanded(false);
 
-        VBox toolbar = new VBox(4, toolbarRow1, toolbarRow2, toolbarRow3, toolbarRow4);
+        FlowPane exportFlow = new FlowPane(8, 4, exportCsvButton, exportJsonButton, exportGeoPackageButton,
+                reportHtmlButton, reportPdfButton);
+        TitledPane exportPane = new TitledPane(Messages.get("survey.section.export"), exportFlow);
+        exportPane.setExpanded(false);
+
+        VBox toolbar = new VBox(4, measurementPane, analysisPane, positionPane, exportPane);
         toolbar.setPadding(new Insets(8));
         root.setTop(toolbar);
     }
@@ -396,13 +430,13 @@ public final class SurveyView {
 
     /**
      * Records a new survey point at the given normalized (0..1) image coordinates - shared by the
-     * manual canvas-click path above and the GPS auto-record path (see {@link #onGpsPosition}),
-     * so both use exactly the same Wi-Fi snapshot / optional ping / optional throughput recording
-     * logic instead of duplicating it. Must be called on the JavaFX Application thread, with
-     * {@link #floorPlanImage}/{@link #latestSnapshot} already confirmed non-null by the caller -
-     * each caller handles a missing precondition differently (the manual click path shows a
-     * blocking alert; the GPS path just skips silently, since popping an alert on every position
-     * update would be disruptive).
+     * manual canvas-click path above and both auto-record position sources ({@link #onGpsPosition},
+     * {@link #onWifiPositionTick}), so all three use exactly the same Wi-Fi snapshot / optional
+     * ping / optional throughput recording logic instead of duplicating it. Must be called on the
+     * JavaFX Application thread, with {@link #floorPlanImage}/{@link #latestSnapshot} already
+     * confirmed non-null by the caller - each caller handles a missing precondition differently
+     * (the manual click path shows a blocking alert; the auto-record paths just skip silently,
+     * since popping an alert on every position update would be disruptive).
      */
     private void recordPoint(double xNorm, double yNorm) {
         Map<String, Integer> rssiByBssid = new LinkedHashMap<>();
@@ -440,6 +474,29 @@ public final class SurveyView {
                 });
             });
         }
+        refreshKnownApPositions();
+    }
+
+    /**
+     * Recomputes {@link #knownApPositions} from every BSSID seen across {@link #points} so far -
+     * called after every new point (manual or auto-recorded), so a Wi-Fi position fix always sees
+     * the latest AP-position knowledge, including knowledge learned from points that Wi-Fi
+     * auto-record itself just recorded (a walking session can bootstrap its own accuracy: the
+     * first few points must come from manual clicks or GPS, but once enough of them are in, some
+     * BSSIDs become "known" and Wi-Fi positioning can take over).
+     */
+    private void refreshKnownApPositions() {
+        knownApPositions.clear();
+        Set<String> bssids = new LinkedHashSet<>();
+        for (SurveyPoint p : points) {
+            bssids.addAll(p.rssiByBssid.keySet());
+        }
+        for (String bssid : bssids) {
+            ApPositionEstimator.Estimate estimate = ApPositionEstimator.estimate(points, bssid);
+            if (estimate != null) {
+                knownApPositions.put(bssid, estimate);
+            }
+        }
     }
 
     /** Opens {@link GpsCalibrationDialog} against the current background image, storing the result for both auto-recording and project persistence. */
@@ -451,41 +508,69 @@ public final class SurveyView {
         GpsCalibrationDialog.show(currentStage(), floorPlanImage, calibrationPoints).ifPresent(result -> {
             geoReference = result.geoReference();
             calibrationPoints = new ArrayList<>(result.calibrationPoints());
-            gpsAutoRecordToggle.setDisable(false);
             gpsStatusLabel.setText(Messages.get("survey.gps.calibrated", calibrationPoints.size()));
+            updateAutoRecordAvailability();
         });
     }
 
     /**
-     * Starts turning a live GPS position stream into recorded survey points: {@link PathSampler}
-     * is (re)configured here (not held as a single long-lived instance) since its distance
-     * threshold depends on {@link GeoReference#metersPerNormUnit()}, only known once calibrated.
+     * The auto-record toggle's availability depends on which {@link #positionSourceSelector} is
+     * chosen: GPS needs a completed {@link GeoReference} calibration first, but Wi-Fi positioning
+     * needs no calibration at all (see {@link WifiPositionEstimator}) - it just may have nothing to
+     * work with yet if no BSSID has a known position (handled at record-time, not here). The GPS
+     * accuracy-threshold field is meaningless in Wi-Fi mode since there's no real accuracy figure,
+     * so it's disabled rather than silently ignored.
      */
-    private void startGpsAutoRecord() {
-        double minDistanceMeters = parseDoubleOrDefault(gpsMinDistanceMetersField.getText(), 3.0);
-        double maxAccuracyMeters = parseDoubleOrDefault(gpsMaxAccuracyMetersField.getText(), 30.0);
-        double metersPerNormUnit = geoReference.metersPerNormUnit();
-        double minDistanceNorm = metersPerNormUnit > 0 ? minDistanceMeters / metersPerNormUnit : 0.01;
-        pathSampler = new PathSampler(minDistanceNorm, maxAccuracyMeters);
-        gpsProbe = new GpsProbe(
-                this::onGpsPosition,
-                status -> Platform.runLater(() -> gpsStatusLabel.setText(Messages.get("survey.gps.error", status))));
-        gpsProbe.start();
-        gpsAutoRecordToggle.setText(Messages.get("survey.toggle.gpsAutoRecordOn"));
+    private void updateAutoRecordAvailability() {
+        boolean wifiMode = POSITION_SOURCE_WIFI.equals(positionSourceSelector.getSelectionModel().getSelectedItem());
+        autoRecordToggle.setDisable(!wifiMode && geoReference == null);
+        gpsMaxAccuracyMetersField.setDisable(wifiMode);
     }
 
-    private void stopGpsAutoRecord() {
+    /**
+     * Starts turning a live position stream into recorded survey points: {@link PathSampler} is
+     * (re)configured here (not held as a single long-lived instance) since its distance threshold
+     * depends on {@link GeoReference#metersPerNormUnit()} (GPS mode) which is only known once
+     * calibrated, and doesn't apply at all in Wi-Fi mode.
+     */
+    private void startAutoRecord() {
+        double minDistanceMeters = parseDoubleOrDefault(gpsMinDistanceMetersField.getText(), 3.0);
+        if (POSITION_SOURCE_WIFI.equals(positionSourceSelector.getSelectionModel().getSelectedItem())) {
+            double minDistanceNorm = geoReference != null && geoReference.metersPerNormUnit() > 0
+                    ? minDistanceMeters / geoReference.metersPerNormUnit() : 0.01;
+            // No real accuracy figure exists for a Wi-Fi RSSI-centroid fix (unlike GPS's reported
+            // horizontal accuracy), so the accuracy gate is left permanently open here - reliability
+            // is instead conveyed via the apCount shown in the status label, not enforced as a hard
+            // reject/accept threshold.
+            pathSampler = new PathSampler(minDistanceNorm, Double.MAX_VALUE);
+            refreshKnownApPositions();
+            gpsStatusLabel.setText(Messages.get("survey.wifiPosition.started", knownApPositions.size()));
+        } else {
+            double maxAccuracyMeters = parseDoubleOrDefault(gpsMaxAccuracyMetersField.getText(), 30.0);
+            double metersPerNormUnit = geoReference.metersPerNormUnit();
+            double minDistanceNorm = metersPerNormUnit > 0 ? minDistanceMeters / metersPerNormUnit : 0.01;
+            pathSampler = new PathSampler(minDistanceNorm, maxAccuracyMeters);
+            gpsProbe = new GpsProbe(
+                    this::onGpsPosition,
+                    status -> Platform.runLater(() -> gpsStatusLabel.setText(Messages.get("survey.gps.error", status))));
+            gpsProbe.start();
+        }
+        autoRecordToggle.setText(Messages.get("survey.toggle.autoRecordOn"));
+    }
+
+    private void stopAutoRecord() {
         if (gpsProbe != null) {
             gpsProbe.stop();
             gpsProbe = null;
         }
-        gpsAutoRecordToggle.setText(Messages.get("survey.toggle.gpsAutoRecordOff"));
+        pathSampler = null;
+        autoRecordToggle.setText(Messages.get("survey.toggle.autoRecordOff"));
         gpsStatusLabel.setText("");
     }
 
     /** Stops any active GPS auto-record subprocess - call when the app is shutting down (mirrors {@code TracerouteView.shutdown()}). */
     public void shutdownGps() {
-        stopGpsAutoRecord();
+        stopAutoRecord();
     }
 
     /**
@@ -496,7 +581,7 @@ public final class SurveyView {
     private void onGpsPosition(GpsProbe.Position position) {
         Platform.runLater(() -> {
             gpsStatusLabel.setText(Messages.get("survey.gps.currentFix", position.horizontalAccuracyMeters()));
-            if (geoReference == null || floorPlanImage == null || latestSnapshot == null) {
+            if (geoReference == null || pathSampler == null || floorPlanImage == null || latestSnapshot == null) {
                 // Not ready to record yet (e.g. still waiting for the first Wi-Fi scan) - the
                 // status label above already reflects the live GPS fix, so just skip this update
                 // silently rather than popping the same alert recordPoint()'s manual-click caller
@@ -509,6 +594,29 @@ public final class SurveyView {
                 recordPoint(projected.xNorm(), projected.yNorm());
             }
         });
+    }
+
+    /**
+     * Called from {@link #onSnapshot} on every new Wi-Fi scan while Wi-Fi auto-record is active -
+     * unlike GPS there's no separate live position stream to subscribe to, so a scan tick doubles
+     * as the position-update tick.
+     */
+    private void onWifiPositionTick(ScanSnapshot snapshot) {
+        WifiPositionEstimator.Estimate estimate = WifiPositionEstimator.estimate(knownApPositions, snapshot.accessPoints());
+        if (estimate == null) {
+            gpsStatusLabel.setText(Messages.get("survey.wifiPosition.noKnownAps"));
+            return;
+        }
+        gpsStatusLabel.setText(Messages.get("survey.wifiPosition.currentFix", estimate.apCount()));
+        if (floorPlanImage == null) {
+            // Not ready to record yet - same silent-skip convention as onGpsPosition above.
+            return;
+        }
+        GeoReference.ImagePoint candidate = new GeoReference.ImagePoint(estimate.xNorm(), estimate.yNorm());
+        if (pathSampler.shouldRecord(candidate, 0)) {
+            pathSampler.markRecorded(candidate);
+            recordPoint(candidate.xNorm(), candidate.yNorm());
+        }
     }
 
     private static double parseDoubleOrDefault(String text, double fallback) {
@@ -578,6 +686,10 @@ public final class SurveyView {
         if (newTarget) {
             targetSelector.setButtonCell(null); // force converter re-render of the button area
         }
+        if (autoRecordToggle.isSelected() && pathSampler != null
+                && POSITION_SOURCE_WIFI.equals(positionSourceSelector.getSelectionModel().getSelectedItem())) {
+            onWifiPositionTick(snapshot);
+        }
     }
 
     private void onLoadFloorPlan() {
@@ -602,15 +714,17 @@ public final class SurveyView {
     }
 
     /**
-     * Clears any GPS calibration - called whenever the background image changes, since a stale
-     * {@link GeoReference} fitted against a *different* image would silently mis-place every new
-     * auto-recorded point (same rationale as {@link #clearComparisonState()}).
+     * Clears any GPS calibration and learned AP positions - called whenever the background image
+     * changes, since a stale {@link GeoReference} or {@link #knownApPositions} entry fitted against
+     * a *different* image would silently mis-place every new auto-recorded point (same rationale as
+     * {@link #clearComparisonState()}).
      */
     private void clearGpsCalibration() {
-        stopGpsAutoRecord();
+        stopAutoRecord();
         geoReference = null;
         calibrationPoints = new ArrayList<>();
-        gpsAutoRecordToggle.setDisable(true);
+        knownApPositions.clear();
+        updateAutoRecordAvailability();
     }
 
     /**
@@ -763,11 +877,12 @@ public final class SurveyView {
                     points.clear();
                     points.addAll(project.points);
                     apPlacementSuggestions = List.of();
-                    stopGpsAutoRecord();
+                    stopAutoRecord();
                     calibrationPoints = project.calibrationPoints != null
                             ? new ArrayList<>(project.calibrationPoints) : new ArrayList<>();
                     geoReference = GeoReference.fit(calibrationPoints);
-                    gpsAutoRecordToggle.setDisable(geoReference == null);
+                    refreshKnownApPositions();
+                    updateAutoRecordAvailability();
                     statusLabel.setText(Messages.get("survey.status.projectLoaded", file.getName(), points.size()));
                     redraw();
                 });
