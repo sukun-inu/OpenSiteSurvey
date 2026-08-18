@@ -1,49 +1,34 @@
 # OpenSiteSurvey
 
-A Wi-Fi site survey and monitoring tool for Windows, written in Java (JavaFX).
+A tool for finding the weak Wi-Fi spots in a building, as a colour-coded map.
 
-It drives the Windows Native Wifi API (`Wlanapi.dll`) directly through JNA, reading SSID,
-BSSID, channel, RSSI, link quality, PHY type and security type from the real adapter in
-real time. Built around the day-to-day work of an infrastructure engineer: site surveys,
-post-incident verification, channel planning, security audits and continuous monitoring.
+Load a floor plan, walk around taking measurements at a few points, and signal strength
+gets painted across the map. It will tell you **where coverage is thin, and where to put
+another access point to fill it in**. With GPS it works outdoors too; indoors, a handful
+of manual readings is enough to let it track you as you walk.
 
-The UI ships in both Japanese and English. 日本語の README は [README.ja.md](README.ja.md)。
+It can also be left running as a watchdog — signal drops, unfamiliar access points
+appearing, channels getting congested, all of it raises an alert.
 
-## Highlights
+Windows only. It reads from the Wi-Fi adapter directly, so there is no other-OS version.
 
-- **Wi-Fi 7 (802.11be) / MLO detection from raw beacon IEs.** EHT Capabilities, EHT
-  Operation and Multi-Link elements are parsed directly out of beacons and probe
-  responses, so an AP can be identified as 802.11be even when the driver's own PHY-type
-  reporting has not caught up.
-- **Site survey with real interpolation.** IDW, Ordinary Kriging (spherical variogram)
-  and Natural Neighbor (Sibson approximation by discrete sampling). Coverage-hole
-  highlighting, before/after difference heatmaps against a second project,
-  RSSI-weighted AP position estimation, and a greedy search that proposes up to three
-  new AP placements to close the holes.
-- **Walking heatmaps, indoors and out.** GPS mode calibrates two or three points against
-  real latitude/longitude — similarity transform for two points, least-squares affine
-  for three or more, Haversine great-circle distance for the pixel-to-metre scale.
-  Wi-Fi mode needs no calibration at all and back-solves the current position from RSSI
-  against estimated AP locations.
-- **Security audit.** RSN/WPA information elements are parsed to classify
-  Open / WEP / WPA / WPA2 / WPA2-WPA3 mixed / WPA3, with OUI vendor lookup so a known
-  SSID suddenly served by an unexpected vendor stands out.
-- **Channel planning.** Congestion scoring from RSSI, plus BSS Load utilisation where
-  the AP advertises it. 5 GHz is split along the Japanese sub-bands (J52 / J53 / J56).
-  HT40 / VHT80 / VHT160 widths are detected from beacon IEs and weighted into the score.
-- **Headless / CLI mode.** `--headless` runs the scan loop with no JavaFX UI at all,
-  writing to the same SQLite log as the GUI — for monitor-less servers and remote hosts.
-- **Optional REST API.** Loopback-only and off by default. Four read-only JSON endpoints
-  for external automation.
-- **Plugin API.** Drop a `.jar` implementing `OpenSiteSurveyPlugin` into
-  `~/.opensitesurvey/plugins/`; it is picked up via `ServiceLoader` at next start.
-- **Exports.** CSV, JSON, GeoPackage (`.gpkg`, opens in QGIS and friends), HTML and PDF
-  reports.
+日本語版: [README.ja.md](README.ja.md)
 
-Rule-based alerts (RSSI drop, untrusted AP, new SSID, rising congestion) with Windows
-notifications, SQLite history over preset or custom date ranges, and a traceroute view
-with per-hop RTT statistics are also included. Full list in
-[docs/FEATURES.ja.md](docs/FEATURES.ja.md).
+## What it does
+
+- Real-time scan of every access point in range: SSID, channel, signal, security type
+- Coverage heatmaps over a floor plan, with real interpolation (IDW, Ordinary Kriging,
+  Natural Neighbor) rather than simple shading
+- Suggests where to add access points to close the gaps, and checks coverage against
+  per-use thresholds (voice, video, data)
+- Detects Wi-Fi 7 (802.11be) and MLO from raw beacon data, even when the driver has not
+  caught up
+- Security audit of encryption in use, with hardware vendor lookup
+- Channel planning, with the Japanese 5 GHz sub-bands handled separately
+- Alerts, long-term history, traceroute, headless mode, a read-only REST API and plugins
+- Exports to CSV, JSON, GeoPackage (`.gpkg`, opens in QGIS), HTML and PDF
+
+The full list is in [docs/FEATURES.ja.md](docs/FEATURES.ja.md).
 
 ## What this is not
 
